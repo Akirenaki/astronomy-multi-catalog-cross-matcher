@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+httpx
+sqlalchemy
+aiosqlite
+jinja2
+google-generativeai

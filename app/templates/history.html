@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Recent Searches</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 2rem; line-height: 1.5; }
+    .card { border: 1px solid #ddd; padding: 1rem; border-radius: 8px; max-width: 800px; }
+    .item { border-top: 1px solid #eee; padding: 0.5rem 0; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Recent searches</h1>
+    {% if objects %}
+      {% for entry in objects %}
+        <div class="item">
+          <strong>{{ entry.query_text }}</strong> — {{ entry.resolution_state }}
+          {% if entry.simbad_main_id %} | {{ entry.simbad_main_id }}{% endif %}
+        </div>
+      {% endfor %}
+    {% else %}
+      <p>No history yet.</p>
+    {% endif %}
+    <p><a href="/">Back to search</a></p>
+  </div>
+</body>
+</html>

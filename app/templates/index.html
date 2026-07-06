@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Astronomy Cross-Matcher</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 2rem; line-height: 1.5; }
+    .card { border: 1px solid #ddd; padding: 1rem; border-radius: 8px; max-width: 700px; }
+    input[type="text"] { width: 70%; padding: 0.5rem; }
+    button { padding: 0.5rem 1rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Astronomy Multi-Catalog Cross-Matcher</h1>
+    <p>Resolve an informal star name across SIMBAD and the Exoplanet Archive.</p>
+    <form action="/search" method="get">
+      <input type="text" name="q" placeholder="Try 51 Peg or HD 217014" />
+      <button type="submit">Resolve</button>
+    </form>
+    <p><a href="/history">View recent searches</a></p>
+  </div>
+</body>
+</html>

@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cross-Match Result</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 2rem; line-height: 1.5; }
+    .card { border: 1px solid #ddd; padding: 1rem; border-radius: 8px; max-width: 900px; margin-bottom: 1rem; }
+    .panel { background: #f8f9fa; padding: 1rem; border-radius: 6px; }
+    .label { font-weight: bold; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Resolution result</h1>
+    {% if object %}
+      <p><span class="label">State:</span> {{ object.resolution_state }}</p>
+      <p><span class="label">Main ID:</span> {{ object.simbad_main_id or '—' }}</p>
+      <p><span class="label">Spectral type:</span> {{ object.spectral_type or '—' }}</p>
+      <p><span class="label">RA/Dec:</span> {{ object.ra_deg or '—' }}, {{ object.dec_deg or '—' }}</p>
+      <div class="panel">
+        <h2>Verified catalog data</h2>
+        <p><span class="label">Identifiers:</span> {{ object.identifiers|length }}</p>
+        <p><span class="label">Planets:</span> {{ object.planets|length }}</p>
+        {% if object.resolution_state == 'PARTIAL' %}
+          <p>No planets were found in the Exoplanet Archive for this object.</p>
+        {% endif %}
+        {% if object.resolution_state == 'UNRESOLVED' %}
+          <p>No SIMBAD match was found for this query.</p>
+        {% endif %}
+      </div>
+      <div class="panel" style="margin-top:1rem;">
+        <h2>AI-generated summary</h2>
+        <p>{{ summary }}</p>
+      </div>
+    {% else %}
+      <p>No object found.</p>
+    {% endif %}
+    <p><a href="/">Back to search</a></p>
+  </div>
+</body>
+</html>
