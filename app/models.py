@@ -1,5 +1,6 @@
+import json
 from datetime import datetime
-from typing import List
+from typing import Any, List
 
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -21,6 +22,10 @@ class ObjectRecord(Base):
     spectral_type: Mapped[str | None] = mapped_column(String, nullable=True)
     resolution_state: Mapped[str] = mapped_column(String, nullable=False)
     ai_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Only populated when resolution_state == 'AMBIGUOUS'. Holds the raw list of
+    # candidate dicts (main_id, ra, dec, otype, sp_type) returned by SIMBAD so the
+    # disambiguation list can be rendered/re-rendered without re-querying SIMBAD.
+    candidates_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     resolved_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
@@ -34,6 +39,15 @@ class ObjectRecord(Base):
         ),
     )
 
+    @property
+    def candidates(self) -> list[dict[str, Any]]:
+        if not self.candidates_json:
+            return []
+        try:
+            return json.loads(self.candidates_json)
+        except (TypeError, ValueError):
+            return []
+
     def to_dict(self) -> dict:
         return {
             "id": self.id,
@@ -45,6 +59,7 @@ class ObjectRecord(Base):
             "spectral_type": self.spectral_type,
             "resolution_state": self.resolution_state,
             "ai_summary": self.ai_summary,
+            "candidates": self.candidates,
             "resolved_at": self.resolved_at.isoformat() if self.resolved_at else None,
             "expires_at": self.expires_at.isoformat() if self.expires_at else None,
             "identifiers": [identifier.to_dict() for identifier in self.identifiers],

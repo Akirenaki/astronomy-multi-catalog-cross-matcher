@@ -7,7 +7,7 @@ async def find_planets(alias_list: list[str]) -> tuple[list[dict], str | None]:
 
     for alias in alias_list:
         query = (
-            "SELECT top 20 pl_name, pl_letter, orbital_period, planet_radius, discoveryyear, discoverymethod, hostname "
+            "SELECT top 20 pl_name, pl_letter, pl_orbper, pl_rade, disc_year, discoverymethod, hostname "
             f"FROM pscomppars WHERE hostname = '{alias}'"
         )
 
@@ -37,9 +37,9 @@ async def find_planets(alias_list: list[str]) -> tuple[list[dict], str | None]:
                     {
                         "pl_name": row.get("pl_name") or row.get("PL_NAME"),
                         "pl_letter": row.get("pl_letter") or row.get("PL_LETTER"),
-                        "orbital_period_days": row.get("orbital_period") or row.get("ORBITAL_PERIOD"),
-                        "planet_radius_earth": row.get("planet_radius") or row.get("PLANET_RADIUS"),
-                        "discovery_year": row.get("discoveryyear") or row.get("DISCOVERYYEAR"),
+                        "orbital_period_days": row.get("pl_orbper") or row.get("PL_ORBPER"),
+                        "planet_radius_earth": row.get("pl_rade") or row.get("PL_RADE"),
+                        "discovery_year": row.get("disc_year") or row.get("DISC_YEAR"),
                         "discovery_method": row.get("discoverymethod") or row.get("DISCOVERYMETHOD"),
                     }
                 )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, select
@@ -30,38 +31,36 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
         )
         record = existing.scalar_one_or_none()
 
-        if record is None:
-            record = ObjectRecord(
-                query_text=resolution_result.query_text,
-                simbad_main_id=resolution_result.main_id,
-                ra_deg=resolution_result.ra,
-                dec_deg=resolution_result.dec,
-                otype=resolution_result.otype,
-                spectral_type=resolution_result.spectral_type,
-                resolution_state=resolution_result.state,
-                resolved_at=datetime.now(timezone.utc),
-                expires_at=datetime.now(timezone.utc) + timedelta(days=14),
-            )
-            session.add(record)
-            await session.flush()
-        else:
+        if record is not None:
             session.delete(record)
             await session.flush()
-            record = ObjectRecord(
-                query_text=resolution_result.query_text,
-                simbad_main_id=resolution_result.main_id,
-                ra_deg=resolution_result.ra,
-                dec_deg=resolution_result.dec,
-                otype=resolution_result.otype,
-                spectral_type=resolution_result.spectral_type,
-                resolution_state=resolution_result.state,
-                resolved_at=datetime.now(timezone.utc),
-                expires_at=datetime.now(timezone.utc) + timedelta(days=14),
-            )
-            session.add(record)
-            await session.flush()
 
-        if resolution_result.state == "UNRESOLVED":
+        candidates_json = (
+            json.dumps(resolution_result.candidates) if resolution_result.candidates else None
+        )
+
+        record = ObjectRecord(
+            query_text=resolution_result.query_text,
+            simbad_main_id=resolution_result.main_id,
+            ra_deg=resolution_result.ra,
+            dec_deg=resolution_result.dec,
+            otype=resolution_result.otype,
+            spectral_type=resolution_result.spectral_type,
+            resolution_state=resolution_result.state,
+            candidates_json=candidates_json,
+            resolved_at=datetime.now(timezone.utc),
+            expires_at=datetime.now(timezone.utc) + timedelta(days=14),
+        )
+        session.add(record)
+        await session.flush()
+
+        # UNRESOLVED and AMBIGUOUS both get a short, self-healing TTL rather than
+        # the full 14 days: UNRESOLVED so a later normalization fix isn't masked
+        # by a stale "not found" for two weeks, and AMBIGUOUS because it isn't a
+        # settled identity yet — SIMBAD's data or your resolution logic could
+        # narrow it down on a later attempt, and there's no confirmed object here
+        # to treat as "valid for two weeks" the way RESOLVED/PARTIAL are.
+        if resolution_result.state in ("UNRESOLVED", "AMBIGUOUS"):
             record.expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
 
         await session.execute(
@@ -95,7 +94,7 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
                 )
             )
 
-        if generate_ai_summary and resolution_result.state != "UNRESOLVED":
+        if generate_ai_summary and resolution_result.state not in ("UNRESOLVED", "AMBIGUOUS"):
             summary_payload = {
                 "state": resolution_result.state,
                 "main_id": resolution_result.main_id,

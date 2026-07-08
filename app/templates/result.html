@@ -16,24 +16,48 @@
     <h1>Resolution result</h1>
     {% if object %}
       <p><span class="label">State:</span> {{ object.resolution_state }}</p>
-      <p><span class="label">Main ID:</span> {{ object.simbad_main_id or '—' }}</p>
-      <p><span class="label">Spectral type:</span> {{ object.spectral_type or '—' }}</p>
-      <p><span class="label">RA/Dec:</span> {{ object.ra_deg or '—' }}, {{ object.dec_deg or '—' }}</p>
-      <div class="panel">
-        <h2>Verified catalog data</h2>
-        <p><span class="label">Identifiers:</span> {{ object.identifiers|length }}</p>
-        <p><span class="label">Planets:</span> {{ object.planets|length }}</p>
-        {% if object.resolution_state == 'PARTIAL' %}
-          <p>No planets were found in the Exoplanet Archive for this object.</p>
-        {% endif %}
-        {% if object.resolution_state == 'UNRESOLVED' %}
-          <p>No SIMBAD match was found for this query.</p>
-        {% endif %}
-      </div>
-      <div class="panel" style="margin-top:1rem;">
-        <h2>AI-generated summary</h2>
-        <p>{{ summary }}</p>
-      </div>
+      {% if object.resolution_state == 'AMBIGUOUS' %}
+        <div class="panel">
+          <h2>Multiple possible matches</h2>
+          <p>Your search matched more than one object in SIMBAD. Pick the one you meant:</p>
+          {% if object.candidates %}
+            <ul>
+              {% for candidate in object.candidates %}
+                <li>
+                  <a href="/search?q={{ candidate.main_id | urlencode }}">
+                    <strong>{{ candidate.main_id or '—' }}</strong>
+                  </a>
+                  — {{ candidate.otype or 'unknown type' }}{% if candidate.sp_type %}, {{ candidate.sp_type }}{% endif %}
+                  {% if candidate.ra is not none and candidate.dec is not none %}
+                    (RA {{ candidate.ra }}, Dec {{ candidate.dec }})
+                  {% endif %}
+                </li>
+              {% endfor %}
+            </ul>
+          {% else %}
+            <p>No candidate details were retained for this search.</p>
+          {% endif %}
+        </div>
+      {% else %}
+        <p><span class="label">Main ID:</span> {{ object.simbad_main_id or '—' }}</p>
+        <p><span class="label">Spectral type:</span> {{ object.spectral_type or '—' }}</p>
+        <p><span class="label">RA/Dec:</span> {{ object.ra_deg or '—' }}, {{ object.dec_deg or '—' }}</p>
+        <div class="panel">
+          <h2>Verified catalog data</h2>
+          <p><span class="label">Identifiers:</span> {{ object.identifiers|length }}</p>
+          <p><span class="label">Planets:</span> {{ object.planets|length }}</p>
+          {% if object.resolution_state == 'PARTIAL' %}
+            <p>No planets were found in the Exoplanet Archive for this object.</p>
+          {% endif %}
+          {% if object.resolution_state == 'UNRESOLVED' %}
+            <p>No SIMBAD match was found for this query.</p>
+          {% endif %}
+        </div>
+        <div class="panel" style="margin-top:1rem;">
+          <h2>AI-generated summary</h2>
+          <p>{{ summary }}</p>
+        </div>
+      {% endif %}
     {% else %}
       <p>No object found.</p>
     {% endif %}
