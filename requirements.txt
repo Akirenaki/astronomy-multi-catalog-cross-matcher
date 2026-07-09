@@ -4,5 +4,4 @@ httpx
 sqlalchemy
 aiosqlite
 jinja2
-google-generativeai
 google-genai

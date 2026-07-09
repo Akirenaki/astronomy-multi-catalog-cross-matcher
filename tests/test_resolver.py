@@ -5,6 +5,7 @@ from app.resolver import resolve_query
 
 @pytest.mark.asyncio
 async def test_resolver_returns_unresolved_when_simbad_has_no_match(monkeypatch):
+    """Verify that a missing SIMBAD match produces an UNRESOLVED state."""
     async def fake_simbad(query_text: str):
         return None
 
@@ -23,6 +24,7 @@ async def test_resolver_returns_unresolved_when_simbad_has_no_match(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_resolver_returns_partial_when_simbad_matches_but_no_planets(monkeypatch):
+    """Confirm that a SIMBAD hit without exoplanet data is reported as PARTIAL."""
     async def fake_simbad(query_text: str):
         return {
             "main_id": "51 Peg",
@@ -48,6 +50,7 @@ async def test_resolver_returns_partial_when_simbad_matches_but_no_planets(monke
 
 @pytest.mark.asyncio
 async def test_resolver_returns_resolved_when_planet_match_found(monkeypatch):
+    """Check that a SIMBAD hit with planet data becomes RESOLVED."""
     async def fake_simbad(query_text: str):
         return {
             "main_id": "51 Peg",
@@ -73,6 +76,7 @@ async def test_resolver_returns_resolved_when_planet_match_found(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_resolver_returns_ambiguous_for_multiple_simbad_candidates(monkeypatch):
+    """Ensure multiple SIMBAD candidates are surfaced as an AMBIGUOUS result."""
     async def fake_simbad(query_text: str):
         return [
             {

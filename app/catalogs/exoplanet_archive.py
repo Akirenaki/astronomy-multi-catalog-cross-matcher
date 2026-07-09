@@ -2,9 +2,11 @@ import httpx
 
 
 async def find_planets(alias_list: list[str]) -> tuple[list[dict], str | None]:
+    """Search the NASA Exoplanet Archive for planets associated with each alias in order."""
     if not alias_list:
         return [], None
 
+    # Try each alias until one returns planet data, then stop.
     for alias in alias_list:
         query = (
             "SELECT top 20 pl_name, pl_letter, pl_orbper, pl_rade, disc_year, discoverymethod, hostname "
@@ -28,6 +30,7 @@ async def find_planets(alias_list: list[str]) -> tuple[list[dict], str | None]:
                 response.raise_for_status()
                 rows = response.json().get("data", [])
         except Exception:
+            # If one alias fails or has no planet rows, continue to the next alias.
             continue
 
         if rows:

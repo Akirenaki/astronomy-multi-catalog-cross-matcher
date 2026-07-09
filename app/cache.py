@@ -13,6 +13,7 @@ from app.catalogs.simbad import normalize_query
 
 
 async def get_cached(query_text: str) -> ObjectRecord | None:
+    """Return a cached object record when the normalized query is still fresh."""
     normalized_query = normalize_query(query_text)
     async with SessionLocal() as session:
         result = await session.execute(
@@ -25,7 +26,9 @@ async def get_cached(query_text: str) -> ObjectRecord | None:
 
 
 async def store_result(resolution_result: ResolutionResult, *, generate_ai_summary: bool = True) -> ObjectRecord:
+    """Persist a resolution result and any associated identifiers or planets to the database."""
     async with SessionLocal() as session:
+        # Reuse the same row for a repeated query by removing any previous record first.
         existing = await session.execute(
             select(ObjectRecord).where(ObjectRecord.query_text == resolution_result.query_text)
         )
@@ -35,6 +38,7 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
             session.delete(record)
             await session.flush()
 
+        # Serialize the ambiguous candidate list so it can be restored later without re-querying SIMBAD.
         candidates_json = (
             json.dumps(resolution_result.candidates) if resolution_result.candidates else None
         )
@@ -54,15 +58,11 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
         session.add(record)
         await session.flush()
 
-        # UNRESOLVED and AMBIGUOUS both get a short, self-healing TTL rather than
-        # the full 14 days: UNRESOLVED so a later normalization fix isn't masked
-        # by a stale "not found" for two weeks, and AMBIGUOUS because it isn't a
-        # settled identity yet — SIMBAD's data or your resolution logic could
-        # narrow it down on a later attempt, and there's no confirmed object here
-        # to treat as "valid for two weeks" the way RESOLVED/PARTIAL are.
+        # Unresolved and ambiguous requests should expire quickly so later fixes can be picked up.
         if resolution_result.state in ("UNRESOLVED", "AMBIGUOUS"):
             record.expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
 
+        # Remove any old child rows before inserting the new ones for this object.
         await session.execute(
             delete(IdentifierRecord).where(IdentifierRecord.object_id == record.id)
         )
@@ -71,6 +71,7 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
         )
         await session.flush()
 
+        # Store each alias reported by SIMBAD as an identifier row.
         for alias in resolution_result.aliases:
             session.add(
                 IdentifierRecord(
@@ -81,6 +82,7 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
                 )
             )
 
+        # Store planet rows when the object has known exoplanets.
         for planet in resolution_result.planets:
             session.add(
                 PlanetRecord(
@@ -94,6 +96,7 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
                 )
             )
 
+        # AI summaries are skipped for unresolved/ambiguous results because they do not represent a confirmed object.
         if generate_ai_summary and resolution_result.state not in ("UNRESOLVED", "AMBIGUOUS"):
             summary_payload = {
                 "state": resolution_result.state,
@@ -110,6 +113,7 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
 
 
 async def get_or_resolve(query_text: str) -> ObjectRecord:
+    """Serve a cached result when possible, otherwise resolve the query and store it."""
     cached = await get_cached(query_text)
     if cached is not None:
         return cached
@@ -119,6 +123,7 @@ async def get_or_resolve(query_text: str) -> ObjectRecord:
 
 
 async def get_object_by_simbad_id(simbad_main_id: str) -> ObjectRecord | None:
+    """Look up a stored object by its SIMBAD main identifier."""
     async with SessionLocal() as session:
         result = await session.execute(
             select(ObjectRecord).where(ObjectRecord.simbad_main_id == simbad_main_id)
@@ -127,6 +132,7 @@ async def get_object_by_simbad_id(simbad_main_id: str) -> ObjectRecord | None:
 
 
 async def list_recent_objects(limit: int = 10) -> list[ObjectRecord]:
+    """Return the newest object records, ordered from most recently resolved to oldest."""
     async with SessionLocal() as session:
         result = await session.execute(
             select(ObjectRecord).order_by(ObjectRecord.resolved_at.desc()).limit(limit)

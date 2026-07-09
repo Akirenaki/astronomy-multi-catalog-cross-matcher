@@ -5,18 +5,22 @@ import httpx
 
 
 def normalize_query(query_text: str) -> str:
+    """Clean up user input by collapsing whitespace and removing common catalog prefixes."""
     cleaned = re.sub(r"\s+", " ", (query_text or "").strip())
     if not cleaned:
         return ""
+    # Strip prefixes such as HD, HIP, GJ, and TYC so equivalent names resolve consistently.
     cleaned = re.sub(r"^(HD|HIP|GJ|TYC)\s*", "", cleaned, flags=re.IGNORECASE)
     return cleaned.strip()
 
 
 async def resolve_identity(query_text: str) -> dict | list[dict] | None:
+    """Query SIMBAD for an object identity and return either one candidate or a list of candidates."""
     normalized = normalize_query(query_text)
     if not normalized:
         return None
 
+    # Build an ADQL query that asks SIMBAD for the object metadata and aliases matching the supplied identifier.
     query = (
         "SELECT TOP 10 basic.main_id, basic.ra, basic.dec, basic.otype, basic.sp_type, ids.ids "
         "FROM basic JOIN ident ON basic.oid = ident.oidref JOIN ids ON basic.oid = ids.oidref "
@@ -40,6 +44,7 @@ async def resolve_identity(query_text: str) -> dict | list[dict] | None:
             response.raise_for_status()
             json_data = response.json()
     except Exception:
+        # Any network or formatting issue should be treated as "no identity found" for this request.
         return None
 
     rows: list[dict[str, Any]] = []
@@ -54,6 +59,7 @@ async def resolve_identity(query_text: str) -> dict | list[dict] | None:
     if not rows:
         return None
 
+    # Normalize each SIMBAD row into a consistent structure that the rest of the app can use.
     candidates: list[dict[str, Any]] = []
     for row in rows:
         alias_field = row.get("ids") or row.get("ids.ids") or row.get("ids_ids") or row.get("idsids") or ""

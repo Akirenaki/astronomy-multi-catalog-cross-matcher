@@ -7,12 +7,15 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
+    """Base class for all SQLAlchemy ORM models in this project."""
     pass
 
 
 class ObjectRecord(Base):
+    """Represents one resolved or unresolved object lookup in the cache database."""
     __tablename__ = "objects"
 
+    # Core identity and metadata for the queried astronomical object.
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     simbad_main_id: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
     query_text: Mapped[str] = mapped_column(String, nullable=False)
@@ -22,13 +25,12 @@ class ObjectRecord(Base):
     spectral_type: Mapped[str | None] = mapped_column(String, nullable=True)
     resolution_state: Mapped[str] = mapped_column(String, nullable=False)
     ai_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Only populated when resolution_state == 'AMBIGUOUS'. Holds the raw list of
-    # candidate dicts (main_id, ra, dec, otype, sp_type) returned by SIMBAD so the
-    # disambiguation list can be rendered/re-rendered without re-querying SIMBAD.
+    # Only populated when resolution_state == 'AMBIGUOUS'. This preserves the candidate list for UI rendering.
     candidates_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     resolved_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
+    # Child rows associated with this object, automatically removed when the parent row is deleted.
     identifiers: Mapped[List["IdentifierRecord"]] = relationship(back_populates="object", cascade="all, delete-orphan")
     planets: Mapped[List["PlanetRecord"]] = relationship(back_populates="object", cascade="all, delete-orphan")
 
@@ -41,6 +43,7 @@ class ObjectRecord(Base):
 
     @property
     def candidates(self) -> list[dict[str, Any]]:
+        """Deserialize the stored candidate list back into Python objects for the web layer."""
         if not self.candidates_json:
             return []
         try:
@@ -49,6 +52,7 @@ class ObjectRecord(Base):
             return []
 
     def to_dict(self) -> dict:
+        """Create a JSON-friendly dictionary for API responses."""
         return {
             "id": self.id,
             "simbad_main_id": self.simbad_main_id,
@@ -68,6 +72,7 @@ class ObjectRecord(Base):
 
 
 class IdentifierRecord(Base):
+    """Stores a SIMBAD alias or identifier associated with an object record."""
     __tablename__ = "identifiers"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -81,6 +86,7 @@ class IdentifierRecord(Base):
     __table_args__ = (UniqueConstraint("object_id", "catalog", "identifier", name="uq_identifier"),)
 
     def to_dict(self) -> dict:
+        """Serialize a single identifier row for API output."""
         return {
             "id": self.id,
             "catalog": self.catalog,
@@ -90,6 +96,7 @@ class IdentifierRecord(Base):
 
 
 class PlanetRecord(Base):
+    """Stores planet information linked to a resolved object."""
     __tablename__ = "planets"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -104,6 +111,7 @@ class PlanetRecord(Base):
     object: Mapped[ObjectRecord] = relationship(back_populates="planets")
 
     def to_dict(self) -> dict:
+        """Serialize a planet row for API output."""
         return {
             "id": self.id,
             "pl_name": self.pl_name,

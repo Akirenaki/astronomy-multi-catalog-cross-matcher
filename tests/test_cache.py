@@ -17,6 +17,7 @@ from app.database import init_db
 
 @pytest_asyncio.fixture(autouse=True)
 async def _init_db():
+    """Create the test tables before each test and cleanly tear down the fixture afterward."""
     await init_db()
     yield
 

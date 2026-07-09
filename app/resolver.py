@@ -10,6 +10,7 @@ from app.catalogs.simbad import normalize_query, resolve_identity
 
 @dataclass
 class ResolutionResult:
+    """Structured container for the outcome of a query resolution attempt."""
     query_text: str
     state: str
     main_id: str | None = None
@@ -25,7 +26,10 @@ class ResolutionResult:
 
 
 async def resolve_query(query_text: str) -> ResolutionResult:
+    """Resolve a user query by consulting SIMBAD and optionally the exoplanet archive."""
+    # Normalize the text first so the same object is treated consistently across lookups.
     normalized_query = normalize_query(query_text)
+    # Fetch SIMBAD data concurrently so the rest of the pipeline can proceed without blocking.
     simbad_task = asyncio.create_task(resolve_identity(normalized_query or query_text))
     simbad_result = await simbad_task
 
@@ -40,6 +44,7 @@ async def resolve_query(query_text: str) -> ResolutionResult:
         )
 
     aliases = list(simbad_result.get("aliases", []))
+    # Ask the exoplanet archive for planets only when the object has aliases to check.
     planets_task = asyncio.create_task(find_planets(aliases)) if aliases else None
     planets, matched_alias = await planets_task if planets_task else ([], None)
 
