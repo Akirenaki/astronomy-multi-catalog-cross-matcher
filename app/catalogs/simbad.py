@@ -5,12 +5,26 @@ import httpx
 
 
 def normalize_query(query_text: str) -> str:
-    """Clean up user input by collapsing whitespace and removing common catalog prefixes."""
+    """Clean up whitespace/casing and canonicalize catalog-prefixed identifiers.
+
+    SIMBAD's `ident.id` stores the catalog prefix as part of the identifier
+    itself (e.g. "HD 217014", "HIP 113357") — both "HD 217014" and "HD217014"
+    are accepted by SIMBAD's own identifier lookup, but the prefix must stay.
+    Earlier versions of this function stripped the prefix entirely, which
+    turned a valid identifier like "HD 217014" into a bare "217014" that
+    SIMBAD can't resolve. The fix here is to normalize casing on the prefix
+    and guarantee exactly one space between prefix and number, never to
+    remove the prefix.
+    """
     cleaned = re.sub(r"\s+", " ", (query_text or "").strip())
     if not cleaned:
         return ""
-    # Strip prefixes such as HD, HIP, GJ, and TYC so equivalent names resolve consistently.
-    cleaned = re.sub(r"^(HD|HIP|GJ|TYC)\s*", "", cleaned, flags=re.IGNORECASE)
+
+    match = re.match(r"^(HD|HIP|GJ|TYC)\s*(\S.*)$", cleaned, flags=re.IGNORECASE)
+    if match:
+        prefix, rest = match.groups()
+        cleaned = f"{prefix.upper()} {rest.strip()}"
+
     return cleaned.strip()
 
 
@@ -20,11 +34,12 @@ async def resolve_identity(query_text: str) -> dict | list[dict] | None:
     if not normalized:
         return None
 
+    escaped = normalized.replace("'", "''")
     # Build an ADQL query that asks SIMBAD for the object metadata and aliases matching the supplied identifier.
     query = (
         "SELECT TOP 10 basic.main_id, basic.ra, basic.dec, basic.otype, basic.sp_type, ids.ids "
         "FROM basic JOIN ident ON basic.oid = ident.oidref JOIN ids ON basic.oid = ids.oidref "
-        f"WHERE ident.id = '{normalized}'"
+        f"WHERE ident.id = '{escaped}'"
     )
 
     payload = {

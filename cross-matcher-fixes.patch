@@ -1,0 +1,100 @@
+diff -ruN repo_orig/astronomy-multi-catalog-cross-matcher-main/app/catalogs/simbad.py repo/astronomy-multi-catalog-cross-matcher-main/app/catalogs/simbad.py
+--- repo_orig/astronomy-multi-catalog-cross-matcher-main/app/catalogs/simbad.py	2026-07-08 14:22:20.000000000 +0000
++++ repo/astronomy-multi-catalog-cross-matcher-main/app/catalogs/simbad.py	2026-07-09 16:11:50.686035612 +0000
+@@ -5,10 +5,26 @@
+ 
+ 
+ def normalize_query(query_text: str) -> str:
++    """Clean up whitespace/casing and canonicalize catalog-prefixed identifiers.
++
++    SIMBAD's `ident.id` stores the catalog prefix as part of the identifier
++    itself (e.g. "HD 217014", "HIP 113357") — both "HD 217014" and "HD217014"
++    are accepted by SIMBAD's own identifier lookup, but the prefix must stay.
++    Earlier versions of this function stripped the prefix entirely, which
++    turned a valid identifier like "HD 217014" into a bare "217014" that
++    SIMBAD can't resolve. The fix here is to normalize casing on the prefix
++    and guarantee exactly one space between prefix and number, never to
++    remove the prefix.
++    """
+     cleaned = re.sub(r"\s+", " ", (query_text or "").strip())
+     if not cleaned:
+         return ""
+-    cleaned = re.sub(r"^(HD|HIP|GJ|TYC)\s*", "", cleaned, flags=re.IGNORECASE)
++
++    match = re.match(r"^(HD|HIP|GJ|TYC)\s*(\S.*)$", cleaned, flags=re.IGNORECASE)
++    if match:
++        prefix, rest = match.groups()
++        cleaned = f"{prefix.upper()} {rest.strip()}"
++
+     return cleaned.strip()
+ 
+ 
+@@ -17,10 +33,11 @@
+     if not normalized:
+         return None
+ 
++    escaped = normalized.replace("'", "''")
+     query = (
+         "SELECT TOP 10 basic.main_id, basic.ra, basic.dec, basic.otype, basic.sp_type, ids.ids "
+         "FROM basic JOIN ident ON basic.oid = ident.oidref JOIN ids ON basic.oid = ids.oidref "
+-        f"WHERE ident.id = '{normalized}'"
++        f"WHERE ident.id = '{escaped}'"
+     )
+ 
+     payload = {
+diff -ruN repo_orig/astronomy-multi-catalog-cross-matcher-main/requirements.txt repo/astronomy-multi-catalog-cross-matcher-main/requirements.txt
+--- repo_orig/astronomy-multi-catalog-cross-matcher-main/requirements.txt	2026-07-08 14:22:20.000000000 +0000
++++ repo/astronomy-multi-catalog-cross-matcher-main/requirements.txt	2026-07-09 16:12:21.301031168 +0000
+@@ -4,5 +4,5 @@
+ sqlalchemy
+ aiosqlite
+ jinja2
+-google-generativeai
+-google-genai
+\ No newline at end of file
++google-genai
++python-dotenv
+\ No newline at end of file
+diff -ruN repo_orig/astronomy-multi-catalog-cross-matcher-main/tests/test_normalize_query.py repo/astronomy-multi-catalog-cross-matcher-main/tests/test_normalize_query.py
+--- repo_orig/astronomy-multi-catalog-cross-matcher-main/tests/test_normalize_query.py	1970-01-01 00:00:00.000000000 +0000
++++ repo/astronomy-multi-catalog-cross-matcher-main/tests/test_normalize_query.py	2026-07-09 16:12:17.909917050 +0000
+@@ -0,0 +1,39 @@
++"""Pure unit tests for normalize_query — no network call, per the Phase 2
++checklist item: 'Implement the normalization step first ... unit-testable
++with no network call.'
++
++These specifically guard against the regression where catalog prefixes
++(HD, HIP, GJ, TYC) were being stripped entirely instead of canonicalized.
++SIMBAD's ident.id stores the prefix as part of the identifier itself, so
++stripping it turns a resolvable name into an unresolvable one.
++"""
++
++import pytest
++
++from app.catalogs.simbad import normalize_query
++
++
++@pytest.mark.parametrize(
++    "raw, expected",
++    [
++        ("  51   peg  ", "51 peg"),
++        ("HD 217014", "HD 217014"),
++        ("HD217014", "HD 217014"),
++        ("hd 217014", "HD 217014"),
++        ("hip113357", "HIP 113357"),
++        ("gj 882", "GJ 882"),
++        ("tyc 1234-5678-1", "TYC 1234-5678-1"),
++        ("", ""),
++        ("   ", ""),
++    ],
++)
++def test_normalize_query(raw, expected):
++    assert normalize_query(raw) == expected
++
++
++def test_normalize_query_preserves_prefix_not_just_number():
++    """The core regression: the prefix must survive normalization, not be
++    discarded. A bare '217014' is not equivalent to 'HD 217014' in SIMBAD."""
++    result = normalize_query("HD217014")
++    assert result.startswith("HD")
++    assert result == "HD 217014"
