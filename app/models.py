@@ -27,6 +27,9 @@ class ObjectRecord(Base):
     ai_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Only populated when resolution_state == 'AMBIGUOUS'. This preserves the candidate list for UI rendering.
     candidates_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Serialized (JSON) alias-chain trail, e.g. ["51 pegasi", "51 Peg", "51 Peg b"], for the
+    # "resolved via: ... -> ... -> ..." UI the spec calls for on RESOLVED/PARTIAL pages.
+    resolved_via_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     resolved_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
@@ -51,6 +54,16 @@ class ObjectRecord(Base):
         except (TypeError, ValueError):
             return []
 
+    @property
+    def resolved_via(self) -> list[str]:
+        """Deserialize the stored alias-chain trail (empty list if none was recorded)."""
+        if not self.resolved_via_json:
+            return []
+        try:
+            return json.loads(self.resolved_via_json)
+        except (TypeError, ValueError):
+            return []
+
     def to_dict(self) -> dict:
         """Create a JSON-friendly dictionary for API responses."""
         return {
@@ -64,6 +77,7 @@ class ObjectRecord(Base):
             "resolution_state": self.resolution_state,
             "ai_summary": self.ai_summary,
             "candidates": self.candidates,
+            "resolved_via": self.resolved_via,
             "resolved_at": self.resolved_at.isoformat() if self.resolved_at else None,
             "expires_at": self.expires_at.isoformat() if self.expires_at else None,
             "identifiers": [identifier.to_dict() for identifier in self.identifiers],

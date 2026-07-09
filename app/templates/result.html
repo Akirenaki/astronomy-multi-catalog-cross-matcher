@@ -42,6 +42,11 @@
         <p><span class="label">Main ID:</span> {{ object.simbad_main_id or '—' }}</p>
         <p><span class="label">Spectral type:</span> {{ object.spectral_type or '—' }}</p>
         <p><span class="label">RA/Dec:</span> {{ object.ra_deg or '—' }}, {{ object.dec_deg or '—' }}</p>
+        {% if object.resolved_via %}
+          <p><span class="label">Resolved via:</span>
+            {{ object.resolved_via | select | join(' → ') }}
+          </p>
+        {% endif %}
         <div class="panel">
           <h2>Verified catalog data</h2>
           <p><span class="label">Identifiers:</span> {{ object.identifiers|length }}</p>

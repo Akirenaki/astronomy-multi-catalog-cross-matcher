@@ -46,8 +46,15 @@ async def search(request: Request, q: str | None = None) -> HTMLResponse:
 
 @app.get("/object/{simbad_main_id}", response_class=HTMLResponse)
 async def object_profile(request: Request, simbad_main_id: str) -> HTMLResponse:
-    """Display a previously stored object profile using its SIMBAD identifier."""
+    """Display a previously stored object profile using its SIMBAD identifier.
+
+    Honors the same TTL as /search: if the cached row for this id has expired (or
+    was never cached under this exact id), re-resolve using the id itself, which is
+    always a valid SIMBAD identifier, rather than silently serving stale/blank data.
+    """
     obj = await get_object_by_simbad_id(simbad_main_id)
+    if obj is None:
+        obj = await get_or_resolve(simbad_main_id)
     template = env.get_template("result.html")
     html = template.render(request=request, object=obj, summary=obj.ai_summary if obj else "No summary available.")
     return HTMLResponse(content=html)

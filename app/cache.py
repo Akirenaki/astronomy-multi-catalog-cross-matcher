@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 
 from app.database import SessionLocal
 from app.models import ObjectRecord, IdentifierRecord, PlanetRecord
@@ -28,19 +28,44 @@ async def get_cached(query_text: str) -> ObjectRecord | None:
 async def store_result(resolution_result: ResolutionResult, *, generate_ai_summary: bool = True) -> ObjectRecord:
     """Persist a resolution result and any associated identifiers or planets to the database."""
     async with SessionLocal() as session:
-        # Reuse the same row for a repeated query by removing any previous record first.
-        existing = await session.execute(
+        # Reuse the same row for a repeated query by finding any previous record first. We look
+        # up by BOTH query_text and simbad_main_id (when known) because those are two different
+        # search strings that can legitimately resolve to the same canonical object ("51 Peg" vs
+        # "HD 217014") -- and simbad_main_id is UNIQUE, so failing to catch that case here is what
+        # caused inserts to crash with IntegrityError on the second alias search for a given star.
+        candidate_rows: list[ObjectRecord] = []
+
+        by_query_text = await session.execute(
             select(ObjectRecord).where(ObjectRecord.query_text == resolution_result.query_text)
         )
-        record = existing.scalar_one_or_none()
+        row = by_query_text.scalar_one_or_none()
+        if row is not None:
+            candidate_rows.append(row)
 
-        if record is not None:
-            session.delete(record)
+        if resolution_result.main_id:
+            by_main_id = await session.execute(
+                select(ObjectRecord).where(ObjectRecord.simbad_main_id == resolution_result.main_id)
+            )
+            row = by_main_id.scalar_one_or_none()
+            if row is not None and row not in candidate_rows:
+                candidate_rows.append(row)
+
+        # Delete every matching old row (there will almost always be zero or one, but two distinct
+        # rows are possible if this star was previously cached under a different query_text).
+        # NOTE: session.delete() on an AsyncSession returns a coroutine and must be awaited --
+        # omitting the await here previously left stale rows in place and caused
+        # "IntegrityError: UNIQUE constraint failed: objects.simbad_main_id" on re-resolution.
+        for stale_row in candidate_rows:
+            await session.delete(stale_row)
+        if candidate_rows:
             await session.flush()
 
         # Serialize the ambiguous candidate list so it can be restored later without re-querying SIMBAD.
         candidates_json = (
             json.dumps(resolution_result.candidates) if resolution_result.candidates else None
+        )
+        resolved_via_json = (
+            json.dumps(resolution_result.resolved_via) if resolution_result.resolved_via else None
         )
 
         record = ObjectRecord(
@@ -52,6 +77,7 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
             spectral_type=resolution_result.spectral_type,
             resolution_state=resolution_result.state,
             candidates_json=candidates_json,
+            resolved_via_json=resolved_via_json,
             resolved_at=datetime.now(timezone.utc),
             expires_at=datetime.now(timezone.utc) + timedelta(days=14),
         )
@@ -61,15 +87,6 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
         # Unresolved and ambiguous requests should expire quickly so later fixes can be picked up.
         if resolution_result.state in ("UNRESOLVED", "AMBIGUOUS"):
             record.expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
-
-        # Remove any old child rows before inserting the new ones for this object.
-        await session.execute(
-            delete(IdentifierRecord).where(IdentifierRecord.object_id == record.id)
-        )
-        await session.execute(
-            delete(PlanetRecord).where(PlanetRecord.object_id == record.id)
-        )
-        await session.flush()
 
         # Store each alias reported by SIMBAD as an identifier row.
         for alias in resolution_result.aliases:
@@ -123,10 +140,14 @@ async def get_or_resolve(query_text: str) -> ObjectRecord:
 
 
 async def get_object_by_simbad_id(simbad_main_id: str) -> ObjectRecord | None:
-    """Look up a stored object by its SIMBAD main identifier."""
+    """Look up a stored object by its SIMBAD main identifier, honoring the same TTL as /search
+    so a bookmarked profile URL can't serve arbitrarily stale data forever."""
     async with SessionLocal() as session:
         result = await session.execute(
-            select(ObjectRecord).where(ObjectRecord.simbad_main_id == simbad_main_id)
+            select(ObjectRecord).where(
+                ObjectRecord.simbad_main_id == simbad_main_id,
+                ObjectRecord.expires_at > datetime.now(timezone.utc),
+            )
         )
         return result.scalar_one_or_none()
 

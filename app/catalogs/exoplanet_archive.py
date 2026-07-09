@@ -8,9 +8,12 @@ async def find_planets(alias_list: list[str]) -> tuple[list[dict], str | None]:
 
     # Try each alias until one returns planet data, then stop.
     for alias in alias_list:
+        # Escape embedded single quotes the same way simbad.py does, so aliases like
+        # "O'Donnell's Star" don't silently break the query and get misread as "no planets found".
+        escaped_alias = alias.replace("'", "''")
         query = (
             "SELECT top 20 pl_name, pl_letter, pl_orbper, pl_rade, disc_year, discoverymethod, hostname "
-            f"FROM pscomppars WHERE hostname = '{alias}'"
+            f"FROM pscomppars WHERE hostname = '{escaped_alias}'"
         )
 
         payload = {
