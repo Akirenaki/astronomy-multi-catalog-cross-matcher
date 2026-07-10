@@ -31,7 +31,15 @@ async def find_planets(alias_list: list[str]) -> tuple[list[dict], str | None]:
                     headers={"Accept": "application/json"},
                 )
                 response.raise_for_status()
-                rows = response.json().get("data", [])
+                # The Exoplanet Archive's TAP format=json response is a bare top-level JSON
+                # array of row objects (e.g. [{"pl_name": "...", ...}, ...]) -- NOT wrapped in
+                # a {"data": [...]} envelope the way some other TAP services are. The previous
+                # `.get("data", [])` call assumed a dict and raised AttributeError on every real
+                # response (a list has no .get), which this broad except silently swallowed --
+                # so find_planets() always returned no planets, no matter what. RESOLVED could
+                # never actually trigger against the live API.
+                body = response.json()
+                rows = body if isinstance(body, list) else []
         except Exception:
             # If one alias fails or has no planet rows, continue to the next alias.
             continue

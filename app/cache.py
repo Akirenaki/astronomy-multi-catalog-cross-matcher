@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app.database import SessionLocal
 from app.models import ObjectRecord, IdentifierRecord, PlanetRecord
@@ -17,7 +18,14 @@ async def get_cached(query_text: str) -> ObjectRecord | None:
     normalized_query = normalize_query(query_text)
     async with SessionLocal() as session:
         result = await session.execute(
-            select(ObjectRecord).where(
+            select(ObjectRecord)
+            # Eagerly load these relationships while the session is still open. Both
+            # result.html and ObjectRecord.to_dict() read .identifiers/.planets, but this
+            # session closes as soon as this function returns -- without eager loading here,
+            # touching either attribute afterward raises DetachedInstanceError (the "Internal
+            # Server Error" seen on the /search and /object pages).
+            .options(selectinload(ObjectRecord.identifiers), selectinload(ObjectRecord.planets))
+            .where(
                 ObjectRecord.query_text == (normalized_query or query_text),
                 ObjectRecord.expires_at > datetime.now(timezone.utc),
             )
@@ -125,8 +133,16 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
             record.ai_summary = await generate_summary(summary_payload)
 
         await session.commit()
-        await session.refresh(record)
-        return record
+        # session.refresh() only reloads column attributes, not relationships, so a plain
+        # refresh() here still leaves .identifiers/.planets unloaded and detached once the
+        # session closes below. Re-fetch the row with the same eager-loading options used
+        # elsewhere in this module so the returned record is safe to read from afterward.
+        result = await session.execute(
+            select(ObjectRecord)
+            .options(selectinload(ObjectRecord.identifiers), selectinload(ObjectRecord.planets))
+            .where(ObjectRecord.id == record.id)
+        )
+        return result.scalar_one()
 
 
 async def get_or_resolve(query_text: str) -> ObjectRecord:
@@ -144,7 +160,9 @@ async def get_object_by_simbad_id(simbad_main_id: str) -> ObjectRecord | None:
     so a bookmarked profile URL can't serve arbitrarily stale data forever."""
     async with SessionLocal() as session:
         result = await session.execute(
-            select(ObjectRecord).where(
+            select(ObjectRecord)
+            .options(selectinload(ObjectRecord.identifiers), selectinload(ObjectRecord.planets))
+            .where(
                 ObjectRecord.simbad_main_id == simbad_main_id,
                 ObjectRecord.expires_at > datetime.now(timezone.utc),
             )

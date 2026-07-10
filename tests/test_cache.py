@@ -73,3 +73,46 @@ async def test_ambiguous_candidates_survive_a_cache_hit(monkeypatch):
     assert first.candidates == second.candidates
     # Second call should be served from cache -> SIMBAD not queried again.
     assert resolve_mock.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_resolved_record_relationships_readable_after_session_closes(monkeypatch):
+    """The core bug this test guards against: result.html and to_dict() both read
+    `.identifiers` and `.planets` on the ObjectRecord returned by get_or_resolve(), well
+    after the SessionLocal() context that produced it has closed. Those are lazy-loaded
+    relationships -- touching them outside an open session used to raise
+    sqlalchemy.orm.exc.DetachedInstanceError, which surfaced to real users as a 500
+    "Internal Server Error" on essentially every search (RESOLVED, PARTIAL, and
+    UNRESOLVED all read .identifiers/.planets in the template; only AMBIGUOUS skipped it).
+    """
+    monkeypatch.setattr(
+        "app.resolver.resolve_identity",
+        AsyncMock(
+            return_value={
+                "main_id": "51 Peg",
+                "ra": 344.36,
+                "dec": 20.77,
+                "otype": "Star",
+                "sp_type": "G2V",
+                "aliases": ["HD 217014"],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        "app.resolver.find_planets",
+        AsyncMock(return_value=([{"pl_name": "51 Peg b", "pl_letter": "b"}], "HD 217014")),
+    )
+
+    record = await cache_mod.get_or_resolve("51 Peg Relationship Test")
+
+    # No exception should be raised reaching into these relationships, even though the
+    # session used inside get_or_resolve() has already been closed by this point.
+    assert len(record.identifiers) == 1
+    assert record.identifiers[0].identifier == "HD 217014"
+    assert len(record.planets) == 1
+    assert record.planets[0].pl_name == "51 Peg b"
+
+    # Also confirm a cache hit (get_cached path, not store_result) survives the same way.
+    cached_record = await cache_mod.get_or_resolve("51 Peg Relationship Test")
+    assert len(cached_record.identifiers) == 1
+    assert len(cached_record.planets) == 1
