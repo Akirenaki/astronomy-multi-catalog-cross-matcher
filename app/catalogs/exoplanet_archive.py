@@ -1,4 +1,8 @@
+import logging
+
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 async def find_planets(alias_list: list[str]) -> tuple[list[dict], str | None]:
@@ -41,7 +45,12 @@ async def find_planets(alias_list: list[str]) -> tuple[list[dict], str | None]:
                 body = response.json()
                 rows = body if isinstance(body, list) else []
         except Exception:
-            # If one alias fails or has no planet rows, continue to the next alias.
+            # If one alias fails or has no planet rows, continue to the next alias --
+            # but log first. Swallowing this completely made a transient network error
+            # or rate-limit response (429) on one alias indistinguishable from that
+            # alias genuinely having no planets, which made live UNRESOLVED/PARTIAL
+            # results impossible to debug from the outside.
+            logger.warning("Exoplanet Archive lookup failed for hostname=%r", alias, exc_info=True)
             continue
 
         if rows:

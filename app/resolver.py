@@ -1,10 +1,29 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.catalogs.exoplanet_archive import find_planets
 from app.catalogs.simbad import normalize_query, resolve_identity
+
+# SIMBAD prefixes its main_id/aliases with a type-classifier token for many object
+# categories -- most commonly "*" (star), "**" (double/multiple star), and "V*"
+# (variable star), e.g. "* 51 Peg" or "V* RR Lyr". External catalogs like the NASA
+# Exoplanet Archive don't use this convention: pscomppars.hostname for 51 Pegasi is
+# the plain string "51 Peg", not "* 51 Peg". An exact-string match against SIMBAD's
+# own main_id/aliases therefore misses well-known, unambiguous cross-matches -- this
+# is what made a textbook case like HD 217014 / 51 Peg (host to 51 Peg b, one of the
+# first confirmed exoplanets) come back PARTIAL instead of RESOLVED against the live
+# API in testing.
+_SIMBAD_TYPE_PREFIX_RE = re.compile(r"^(\*\*|V\*|\*)\s+")
+
+
+def _without_simbad_type_prefix(name: str) -> str | None:
+    """Return `name` with a leading SIMBAD type-classifier token removed, or None if
+    there was no such prefix to strip."""
+    stripped = _SIMBAD_TYPE_PREFIX_RE.sub("", name)
+    return stripped if stripped != name else None
 
 
 @dataclass
@@ -59,6 +78,21 @@ async def resolve_query(query_text: str) -> ResolutionResult:
     elif main_id in match_candidates:
         match_candidates.remove(main_id)
         match_candidates.insert(0, main_id)
+
+    # For each identifier, also try the type-prefix-stripped form immediately after
+    # it, so "* 51 Peg" and "51 Peg" are both attempted before moving on to the next
+    # distinct identifier. Order matters here: a false-positive risk from stripping
+    # (e.g. two different catalog objects that happen to share a bare name once their
+    # prefixes are removed) is astronomically unlikely within one star's own alias set,
+    # since these are all aliases SIMBAD already asserts refer to the same object.
+    expanded_candidates: list[str] = []
+    seen: set[str] = set()
+    for candidate in match_candidates:
+        for variant in (candidate, _without_simbad_type_prefix(candidate)):
+            if variant and variant not in seen:
+                expanded_candidates.append(variant)
+                seen.add(variant)
+    match_candidates = expanded_candidates
 
     # Ask the exoplanet archive for planets only when there is something to check.
     planets, matched_alias = await find_planets(match_candidates) if match_candidates else ([], None)

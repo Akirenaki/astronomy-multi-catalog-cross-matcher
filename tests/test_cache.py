@@ -12,12 +12,28 @@ import pytest
 import pytest_asyncio
 
 from app import cache as cache_mod
-from app.database import init_db
+from app.database import engine, init_db
+from app.models import Base
 
 
 @pytest_asyncio.fixture(autouse=True)
 async def _init_db():
-    """Create the test tables before each test and cleanly tear down the fixture afterward."""
+    """Give every test a genuinely empty database, not just tables that exist.
+
+    init_db() only runs Base.metadata.create_all, which is a no-op once the tables
+    already exist -- it does not clear rows. Because this suite uses a persistent
+    on-disk file (astronomy_test_cache.db) rather than an in-memory database, running
+    `pytest` a second time within the same TTL window would silently reuse rows left
+    behind by the previous run. Concretely: test_ambiguous_candidates_survive_a_cache_hit
+    inserts a row for query_text="Alpha Cache Test" with a 1-hour TTL; on a second
+    `pytest` invocation shortly after, that row is still valid, so the test's *first*
+    get_or_resolve() call hits the cache instead of the mocked resolver, and the
+    `resolve_mock.await_count == 1` assertion fails with 0. Dropping and recreating
+    the schema before every test function removes that dependency on how much time (or
+    how many prior runs) have passed since the file was last touched.
+    """
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
     await init_db()
     yield
 

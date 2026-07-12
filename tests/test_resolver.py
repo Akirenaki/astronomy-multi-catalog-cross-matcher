@@ -107,3 +107,41 @@ async def test_resolver_returns_ambiguous_for_multiple_simbad_candidates(monkeyp
 
     assert result.state == "AMBIGUOUS"
     assert len(result.candidates) == 2
+
+
+@pytest.mark.asyncio
+async def test_resolver_strips_simbad_type_prefix_for_exoplanet_cross_match(monkeypatch):
+    """Regression test for a live-testing finding: SIMBAD's main_id/aliases carry a
+    type-classifier prefix (e.g. "* 51 Peg") that the NASA Exoplanet Archive's plain
+    hostname field ("51 Peg") does not use. An exact-string match against only the
+    SIMBAD-formatted identifiers misses a textbook case like 51 Peg / 51 Peg b, which
+    resolved as PARTIAL instead of RESOLVED against the real APIs before this fix."""
+
+    async def fake_simbad(query_text: str):
+        return {
+            "main_id": "* 51 Peg",
+            "ra": 344.36,
+            "dec": 20.77,
+            "otype": "Star",
+            "sp_type": "G2IV",
+            "aliases": ["HD 217014", "HIP 113357"],
+        }
+
+    seen_hostnames: list[str] = []
+
+    async def fake_planets(alias_list):
+        seen_hostnames.extend(alias_list)
+        if "51 Peg" in alias_list:
+            return [{"pl_name": "51 Peg b", "pl_letter": "b"}], "51 Peg"
+        return [], None
+
+    monkeypatch.setattr("app.resolver.resolve_identity", fake_simbad)
+    monkeypatch.setattr("app.resolver.find_planets", fake_planets)
+
+    result = await resolve_query("HD217014")
+
+    assert result.state == "RESOLVED"
+    assert result.matched_alias == "51 Peg"
+    # The stripped form should be tried right after its prefixed original, not just
+    # appended at the very end behind every other alias.
+    assert seen_hostnames.index("51 Peg") < seen_hostnames.index("HIP 113357")

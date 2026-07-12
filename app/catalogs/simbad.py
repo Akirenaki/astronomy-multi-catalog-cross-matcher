@@ -1,7 +1,10 @@
+import logging
 import re
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_query(query_text: str) -> str:
@@ -59,7 +62,13 @@ async def resolve_identity(query_text: str) -> dict | list[dict] | None:
             response.raise_for_status()
             json_data = response.json()
     except Exception:
-        # Any network or formatting issue should be treated as "no identity found" for this request.
+        # Any network or formatting issue is treated as "no identity found" for this
+        # request -- but log it first. Without this, a genuine "SIMBAD has never heard
+        # of this name" and a transient network/rate-limit failure (SIMBAD blocks
+        # bursts above ~5-10 req/sec) both surface identically as UNRESOLVED, which
+        # makes a real gap in the resolver indistinguishable from a self-inflicted
+        # rate limit during a quick round of manual testing.
+        logger.warning("SIMBAD lookup failed for query_text=%r", normalized, exc_info=True)
         return None
 
     rows: list[dict[str, Any]] = []
