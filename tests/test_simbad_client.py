@@ -1,0 +1,97 @@
+"""Unit tests for resolve_identity() against a *realistic* mocked HTTP response shape.
+
+The regression this guards against: SIMBAD's TAP `format=json` response follows the
+standard IVOA TAP JSON envelope --
+
+    {"metadata": [{"name": "main_id", ...}, ...], "data": [["* 51 Peg", 344.36, ...], ...]}
+
+-- where each row in "data" is a POSITIONAL array, not a dict keyed by column name.
+An earlier version of this module assumed every row already arrived as a dict (the
+shape the *Exoplanet Archive* returns, not SIMBAD) and filtered on `isinstance(row, dict)`,
+which silently dropped every real row and made every query resolve as UNRESOLVED.
+
+test_resolver.py deliberately does NOT catch this class of bug, because it monkeypatches
+resolve_identity() itself rather than exercising the JSON-parsing code. These tests mock
+httpx one layer lower, at the response object, so the real parsing logic runs.
+"""
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from app.catalogs.simbad import resolve_identity
+
+
+def _fake_client(json_body):
+    """Build a mock httpx.AsyncClient whose .post() returns a response with the given
+    already-decoded JSON body, mirroring the real TAP endpoint's shape."""
+    response = MagicMock()
+    response.raise_for_status = MagicMock()
+    response.json = MagicMock(return_value=json_body)
+
+    client = AsyncMock()
+    client.__aenter__.return_value = client
+    client.__aexit__.return_value = False
+    client.post = AsyncMock(return_value=response)
+    return client
+
+
+def _tap_envelope(rows: list[list]) -> dict:
+    """Build a realistic SIMBAD TAP JSON envelope for the columns this app queries."""
+    return {
+        "metadata": [
+            {"name": "main_id", "datatype": "char"},
+            {"name": "ra", "datatype": "double"},
+            {"name": "dec", "datatype": "double"},
+            {"name": "otype", "datatype": "char"},
+            {"name": "sp_type", "datatype": "char"},
+            {"name": "ids", "datatype": "char"},
+        ],
+        "data": rows,
+    }
+
+
+@pytest.mark.asyncio
+async def test_resolve_identity_parses_realistic_metadata_data_envelope():
+    """The core regression: a positional metadata+data envelope (the real API shape)
+    must be parsed successfully into a single candidate dict, not treated as zero rows."""
+    payload = _tap_envelope(
+        [["51 Peg", 344.36, 20.77, "Star", "G2V", "HD 217014|HIP 113357|51 Peg"]]
+    )
+    with patch("httpx.AsyncClient", return_value=_fake_client(payload)):
+        result = await resolve_identity("51 Peg")
+
+    assert result is not None
+    assert isinstance(result, dict)
+    assert result["main_id"] == "51 Peg"
+    assert result["sp_type"] == "G2V"
+    assert "HD 217014" in result["aliases"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_identity_returns_multiple_candidates_as_ambiguous_list():
+    """Two rows in the envelope should come back as a list of candidates, not be
+    silently collapsed into one and not be dropped for failing an isinstance(dict) check."""
+    payload = _tap_envelope(
+        [
+            ["51 Peg", 344.36, 20.77, "Star", "G2V", "HD 217014"],
+            ["51 Peg B", 344.37, 20.78, "Star", "M4V", "HD 217014 B"],
+        ]
+    )
+    with patch("httpx.AsyncClient", return_value=_fake_client(payload)):
+        result = await resolve_identity("51 Peg")
+
+    assert isinstance(result, list)
+    assert len(result) == 2
+    assert {c["main_id"] for c in result} == {"51 Peg", "51 Peg B"}
+
+
+@pytest.mark.asyncio
+async def test_resolve_identity_returns_none_for_genuinely_empty_envelope():
+    """A name SIMBAD has never heard of returns a real empty envelope -- confirm that
+    still cleanly produces None, not an exception."""
+    payload = _tap_envelope([])
+    with patch("httpx.AsyncClient", return_value=_fake_client(payload)):
+        result = await resolve_identity("asdkfjhasdf")
+
+    assert result is None

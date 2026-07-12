@@ -64,7 +64,35 @@ async def resolve_identity(query_text: str) -> dict | list[dict] | None:
 
     rows: list[dict[str, Any]] = []
     if isinstance(json_data, dict):
-        if isinstance(json_data.get("data"), list):
+        metadata = json_data.get("metadata")
+        data = json_data.get("data")
+        if isinstance(metadata, list) and isinstance(data, list):
+            # SIMBAD's TAP service follows the standard IVOA TAP JSON envelope (the same
+            # shape used by e.g. the Gaia archive): {"metadata": [{"name": ...}, ...],
+            # "data": [[v1, v2, ...], ...]}. Each row is a POSITIONAL array, not a dict
+            # keyed by column name -- the column order is only given once, in "metadata".
+            # The previous code assumed every row was already a dict (`row.get("ids")`,
+            # `isinstance(row, dict)`), which is the shape the *Exoplanet Archive* returns,
+            # not SIMBAD. Against a real response every row failed the `isinstance(row, dict)`
+            # check, so `rows` was always empty and resolve_identity() always returned None --
+            # every query would have come back UNRESOLVED against the live API despite every
+            # resolver/cache test passing, because those tests mock resolve_identity() itself
+            # rather than exercising this parsing code.
+            column_names = [
+                col.get("name") if isinstance(col, dict) else None for col in metadata
+            ]
+            for raw_row in data:
+                if isinstance(raw_row, dict):
+                    rows.append(raw_row)
+                elif isinstance(raw_row, (list, tuple)):
+                    rows.append(
+                        {
+                            name: value
+                            for name, value in zip(column_names, raw_row)
+                            if name is not None
+                        }
+                    )
+        elif isinstance(json_data.get("data"), list):
             rows = [row for row in json_data["data"] if isinstance(row, dict)]
         elif isinstance(json_data.get("results"), list):
             rows = [row for row in json_data["results"] if isinstance(row, dict)]

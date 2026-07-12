@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from app.database import SessionLocal
@@ -132,7 +133,34 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
             }
             record.ai_summary = await generate_summary(summary_payload)
 
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError:
+            # The candidate_rows lookup above is a check-then-act sequence: two concurrent
+            # get_or_resolve() calls for the same brand-new star (e.g. a double-click, two
+            # browser tabs, or two workers) can both find zero existing rows and both reach
+            # this commit, since neither has committed yet when the other runs its SELECT.
+            # The second commit then violates the UNIQUE constraint on simbad_main_id. Rather
+            # than surfacing that as a 500 to the user, treat it the same as a cache hit:
+            # roll back this session's failed insert and return the row the other request
+            # just committed.
+            await session.rollback()
+            fallback_query = select(ObjectRecord).options(
+                selectinload(ObjectRecord.identifiers), selectinload(ObjectRecord.planets)
+            )
+            if resolution_result.main_id:
+                fallback_query = fallback_query.where(ObjectRecord.simbad_main_id == resolution_result.main_id)
+            else:
+                fallback_query = fallback_query.where(ObjectRecord.query_text == resolution_result.query_text)
+            result = await session.execute(fallback_query)
+            winner = result.scalars().first()
+            if winner is not None:
+                return winner
+            # Extremely unlikely (the conflicting row would have to disappear between the
+            # failed commit and this re-query), but re-raise rather than returning None from
+            # a function whose return type promises an ObjectRecord.
+            raise
+
         # session.refresh() only reloads column attributes, not relationships, so a plain
         # refresh() here still leaves .identifiers/.planets unloaded and detached once the
         # session closes below. Re-fetch the row with the same eager-loading options used
