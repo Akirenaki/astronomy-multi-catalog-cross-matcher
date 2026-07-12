@@ -139,6 +139,9 @@ Stores structural data for confirmed exoplanets tied to host stars, sourced from
 
 ### **A. Resolve Explanation**
 
+<details>
+<summary><b>View Resolve Explanation (Click to expand)</b></summary>
+
 **"Resolve"** = take an informal, ambiguous star name and turn it into a confirmed astronomical identity. The app is answering the question: "**Do we know what object the user is asking about, and can we find it across multiple independent catalogs?**"
 
 Example: the user types `"51 peg"` (lowercase, casual spelling of a real star). The app resolves this by:
@@ -151,7 +154,13 @@ Example: the user types `"51 peg"` (lowercase, casual spelling of a real star). 
 
 At each step, gains more certainty about what the user was asking for. "Resolve" is successfully completing that chain.
 
+</details>
+
 ### **B. Four States Explanation**
+
+<details>
+
+<summary><b>View Four States Explanation (Click to expand)</b></summary>
 
 - #### **RESOLVED** ✓✓
 
@@ -214,3 +223,5 @@ Does SIMBAD know this object?
 ```
 
 **Each state is mutually exclusive and exhaustive** — every possible search outcome falls into exactly one bucket.
+
+</details>
