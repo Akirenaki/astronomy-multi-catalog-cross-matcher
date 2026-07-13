@@ -53,7 +53,14 @@ async def resolve_identity(query_text: str) -> dict | list[dict] | None:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
+        # A flat `timeout=20` applies that same 20s budget to connect, read, write, AND
+        # pool-acquisition independently -- so a host that's genuinely unreachable
+        # (firewalled, DNS issue, dead route) still takes up to 20s to fail, which is
+        # indistinguishable from "the server is just slow" while debugging. Splitting
+        # these lets a connection failure surface in ~5s while still giving a legitimately
+        # slow-but-reachable SIMBAD response the full 20s to complete.
+        timeout = httpx.Timeout(connect=5.0, read=20.0, write=10.0, pool=5.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 "https://simbad.cds.unistra.fr/simbad/sim-tap/sync",
                 data=payload,

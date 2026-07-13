@@ -28,7 +28,10 @@ async def find_planets(alias_list: list[str]) -> tuple[list[dict], str | None]:
         }
 
         try:
-            async with httpx.AsyncClient(timeout=20) as client:
+            # See the matching comment in catalogs/simbad.py -- splitting connect from
+            # read lets an unreachable host fail fast instead of always taking 20s.
+            timeout = httpx.Timeout(connect=5.0, read=20.0, write=10.0, pool=5.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(
                     "https://exoplanetarchive.ipac.caltech.edu/TAP/sync",
                     data=payload,

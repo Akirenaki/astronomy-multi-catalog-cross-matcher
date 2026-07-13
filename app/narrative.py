@@ -14,6 +14,13 @@ async def generate_summary(payload: dict[str, Any]) -> str:
     """Generate a plain-English summary of an astronomical object using the Google Gemini API."""
     # Skip the API request entirely when the required key is missing.
     if not os.getenv("GEMINI_API_KEY"):
+        logger.warning(
+            "GEMINI_API_KEY is not set -- skipping narrative generation and "
+            "returning the default 'No summary available.' message. This is a silent "
+            "no-op by design (it should never crash the app), but it means every "
+            "resolved/partial result will show no summary until a key is configured "
+            "in .env."
+        )
         return "No summary available."
 
     try:
