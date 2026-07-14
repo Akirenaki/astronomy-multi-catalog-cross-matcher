@@ -62,7 +62,7 @@ async def generate_summary(payload: dict[str, Any]) -> str:
     try:
         # Uses the fast, pre-warmed connection pool from the global client
         response = await client.aio.models.generate_content(
-            model="gemini-2.5-flash",  # note: gemini-2.5-flash is the stable production flash model
+            model="gemini-3.5-flash",  # note: gemini-3.5-flash is the stable production flash model
             contents=f"Explain the following astronomical object data in plain English: {payload}",
         )
         return response.text or "No summary available."
