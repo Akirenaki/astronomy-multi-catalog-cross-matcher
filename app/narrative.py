@@ -2,19 +2,26 @@ import logging
 import os
 from pathlib import Path
 from typing import Any
+
 from dotenv import load_dotenv
-from google import genai
-from google.genai.errors import APIError  # Clean error handling
+
+try:
+    from google import genai
+    from google.genai.errors import APIError  # Clean error handling
+except ImportError:  # pragma: no cover - exercised when the optional dependency is absent
+    genai = None
+
+    class APIError(Exception):
+        """Fallback API error used when google-genai is not installed."""
+
+        pass
 
 logger = logging.getLogger(__name__)
 
-# 1. Use reliable, deterministic paths to load the environment first
-ROOT_DIR = Path(__file__).resolve().parents[1]
-load_dotenv(dotenv_path=ROOT_DIR / ".env")
 
-
-# 2. Safely initialize the global client without breaking on missing keys
-def _init_client() -> genai.Client | None:
+def _init_client() -> Any | None:
+    if genai is None:
+        return None
     if not os.getenv("GEMINI_API_KEY"):
         return None
     try:
@@ -24,7 +31,23 @@ def _init_client() -> genai.Client | None:
         return None
 
 
-client = _init_client()
+client: Any | None = None
+
+
+def load_environment() -> None:
+    """Load environment variables from the repository and app-local .env files."""
+    module_path = Path(__file__).resolve()
+    app_dir = module_path.parent
+    root_dir = module_path.parents[1]
+
+    load_dotenv(dotenv_path=root_dir / ".env", override=False)
+    load_dotenv(dotenv_path=app_dir / ".env", override=True)
+
+    global client
+    client = _init_client()
+
+
+load_environment()
 
 
 async def generate_summary(payload: dict[str, Any]) -> str:

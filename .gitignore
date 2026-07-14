@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 astronomy.db
 astronomy_test_cache.db
+terminal-result.bash
