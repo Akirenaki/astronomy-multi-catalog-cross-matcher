@@ -73,7 +73,9 @@ async def api_resolve(q: str | None = None) -> JSONResponse:
 @app.get("/history", response_class=HTMLResponse)
 async def history(request: Request) -> HTMLResponse:
     """Show the most recently resolved objects from the cache database."""
-    objects = await list_recent_objects(limit=10)
+    objects = list_recent_objects(limit=10)
+    if hasattr(objects, "__await__"):
+        objects = await objects
     template = env.get_template("history.html")
     html = template.render(request=request, objects=objects)
     return HTMLResponse(content=html)

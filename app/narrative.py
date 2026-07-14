@@ -1,39 +1,52 @@
 import logging
 import os
+from pathlib import Path
 from typing import Any
-
 from dotenv import load_dotenv
 from google import genai
+from google.genai.errors import APIError  # Clean error handling
 
-# Load environment variables from a local .env file when present.
-load_dotenv()
 logger = logging.getLogger(__name__)
+
+# 1. Use reliable, deterministic paths to load the environment first
+ROOT_DIR = Path(__file__).resolve().parents[1]
+load_dotenv(dotenv_path=ROOT_DIR / ".env")
+
+
+# 2. Safely initialize the global client without breaking on missing keys
+def _init_client() -> genai.Client | None:
+    if not os.getenv("GEMINI_API_KEY"):
+        return None
+    try:
+        return genai.Client()
+    except Exception as e:
+        logger.error("Failed to initialize Gemini client: %s", e)
+        return None
+
+
+client = _init_client()
 
 
 async def generate_summary(payload: dict[str, Any]) -> str:
-    """Generate a plain-English summary of an astronomical object using the Google Gemini API."""
-    # Skip the API request entirely when the required key is missing.
-    if not os.getenv("GEMINI_API_KEY"):
+    """Generate a plain-English summary of an astronomical object."""
+    if not client:
         logger.warning(
-            "GEMINI_API_KEY is not set -- skipping narrative generation and "
-            "returning the default 'No summary available.' message. This is a silent "
-            "no-op by design (it should never crash the app), but it means every "
-            "resolved/partial result will show no summary until a key is configured "
-            "in .env."
+            "GEMINI_API_KEY is not set -- skipping narrative generation. "
+            "Returning default 'No summary available.' message."
         )
         return "No summary available."
 
     try:
-        # Create the async Gemini client; it reads the API key from the environment automatically.
-        client = genai.Client()
-
-        # Ask Gemini to explain the resolved object data in simple language for a general audience.
+        # Uses the fast, pre-warmed connection pool from the global client
         response = await client.aio.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=f"Explain the following astronomical object data in plain English for a general audience: {payload}",
+            model="gemini-2.5-flash",  # note: gemini-2.5-flash is the stable production flash model
+            contents=f"Explain the following astronomical object data in plain English: {payload}",
         )
         return response.text or "No summary available."
+    except APIError as e:
+        # Catch specific SDK/API errors first
+        logger.error("Gemini API error occurred: %s", e)
+        return "No summary available."
     except Exception as e:
-        # Any network or SDK failure should never crash the app; the UI can fall back to a default message.
-        logger.exception("Failed to generate summary: %s", e)
+        logger.exception("Unexpected failure while generating summary: %s", e)
         return "No summary available."

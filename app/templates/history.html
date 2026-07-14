@@ -16,7 +16,14 @@
     {% if objects %}
       {% for entry in objects %}
         <div class="item">
-          <strong>{{ entry.query_text }}</strong> — {{ entry.resolution_state }}
+          {% if entry.simbad_main_id %}
+            <a href="/object/{{ entry.simbad_main_id | urlencode }}">
+              <strong>{{ entry.query_text }}</strong>
+            </a>
+          {% else %}
+            <strong>{{ entry.query_text }}</strong>
+          {% endif %}
+          — {{ entry.resolution_state }}
           {% if entry.simbad_main_id %} | {{ entry.simbad_main_id }}{% endif %}
         </div>
       {% endfor %}
