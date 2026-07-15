@@ -34,6 +34,36 @@ def _init_client() -> Any | None:
 client: Any | None = None
 
 
+def _is_rate_limit_or_quota_error(error: Exception) -> bool:
+    """Best-effort detection for Gemini rate-limit and quota exhaustion failures."""
+    code = getattr(error, "code", None)
+    status_code = getattr(error, "status_code", None)
+    status = getattr(error, "status", None)
+    
+    # Extract the most descriptive string possible
+    err_detail = getattr(error, "message", str(error))
+    message = str(err_detail).upper()
+
+    if code == 429 or status_code == 429 or status == 429 or status == "RESOURCE_EXHAUSTED":
+        return True
+
+    # Check for common quota/rate-limit keywords in the error message; uppercase to match message = str(err_detail).upper()
+    quota_markers = (
+        "RESOURCE_EXHAUSTED",
+        "RATE LIMIT",
+        "RATE_LIMIT",
+        "QUOTA",
+        "RPM", #Request per Minute
+        "TPM", #Tokens per Minute
+        "TOKENS PER MINUTE",
+        "REQUESTS PER MINUTE",
+        "REQUESTS PER DAY",
+        "RPD", #Requests per Day
+        "TOO MANY REQUESTS",
+    )
+    return any(marker in message for marker in quota_markers)
+
+
 def load_environment() -> None:
     """Load environment variables from the repository and app-local .env files."""
     module_path = Path(__file__).resolve()
@@ -67,7 +97,15 @@ async def generate_summary(payload: dict[str, Any]) -> str:
         )
         return response.text or "No summary available."
     except APIError as e:
-        # Catch specific SDK/API errors first
+        if _is_rate_limit_or_quota_error(e):
+            logger.error(
+                "Gemini rate limit/quota triggered (likely RPM/TPM/token budget exceeded). "
+                "Technical details: %s",
+                e,
+            )
+            return "Rate limit exceeded. Please wait a moment before trying again."
+
+        # Catch remaining Gemini API errors (4xx/5xx and other SDK failures)
         logger.error("Gemini API error occurred: %s", e)
         return "No summary available."
     except Exception as e:
