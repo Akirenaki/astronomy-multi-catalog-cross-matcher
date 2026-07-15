@@ -1,3 +1,5 @@
+"""Database configuration and async SQLAlchemy session helpers."""
+
 import os
 from collections.abc import AsyncGenerator
 

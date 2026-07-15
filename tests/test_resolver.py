@@ -1,3 +1,5 @@
+"""Tests for the high-level astronomical object resolver."""
+
 import pytest
 
 from app.resolver import resolve_query

@@ -1,3 +1,5 @@
+"""Helpers for normalizing and resolving SIMBAD identifiers."""
+
 import logging
 import re
 from typing import Any

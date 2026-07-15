@@ -1,3 +1,5 @@
+"""Tests for environment loading and narrative helpers."""
+
 import os
 
 from app import narrative

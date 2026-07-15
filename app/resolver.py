@@ -1,3 +1,5 @@
+"""Core cross-catalog resolution logic for astronomical object queries."""
+
 from __future__ import annotations
 
 import re

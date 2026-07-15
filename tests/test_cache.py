@@ -1,15 +1,16 @@
+"""Tests for cache behavior and cached resolution lookups."""
+
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock
 import os
+
+import pytest
+import pytest_asyncio
 
 # Use an isolated on-disk test database so these tests never touch the app's
 # real astronomy.db, and so the engine binds to this URL before app.database
 # is imported anywhere else in the test session.
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///./astronomy_test_cache.db")
-
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock
-
-import pytest
-import pytest_asyncio
 
 from app import cache as cache_mod
 from app.database import engine, init_db

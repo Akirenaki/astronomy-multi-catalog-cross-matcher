@@ -1,3 +1,5 @@
+"""FastAPI application entry point and route definitions."""
+
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request

@@ -1,3 +1,5 @@
+"""Helpers for querying the NASA Exoplanet Archive."""
+
 import logging
 
 import httpx

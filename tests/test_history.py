@@ -1,3 +1,5 @@
+"""Tests for the recent-history page and its object links."""
+
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient

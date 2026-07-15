@@ -1,3 +1,5 @@
+"""Natural-language summary generation for resolved object lookups."""
+
 import logging
 import os
 from pathlib import Path
