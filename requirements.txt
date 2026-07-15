@@ -6,3 +6,5 @@ aiosqlite
 jinja2
 google-genai
 python-dotenv
+pytest
+pytest-asyncio
