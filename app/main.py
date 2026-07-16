@@ -1,5 +1,6 @@
 """FastAPI application entry point and route definitions."""
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -8,6 +9,18 @@ from jinja2 import Environment, FileSystemLoader
 
 from app.cache import get_object_by_simbad_id, get_or_resolve, list_recent_objects
 from app.database import init_db
+
+# uvicorn's default logging config only sets up its own "uvicorn"/"uvicorn.error"/
+# "uvicorn.access" loggers -- it does not touch the root logger. Every app.* module
+# (resolver, cache, catalogs.simbad, catalogs.exoplanet_archive) creates its logger via
+# plain logging.getLogger(__name__) and relies on propagation to root, so without this,
+# every logger.info()/logger.warning() call in this app -- including the per-stage
+# timing diagnostics used to debug slow searches -- is silently discarded rather than
+# printed anywhere, even when running with `uvicorn app.main:app --reload`.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 
 @asynccontextmanager

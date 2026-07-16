@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.catalogs.exoplanet_archive import find_planets
 from app.catalogs.simbad import SimbadLookupError, normalize_query, resolve_identity
+
+logger = logging.getLogger(__name__)
 
 # SIMBAD prefixes its main_id/aliases with a type-classifier token for many object
 # categories -- most commonly "*" (star), "**" (double/multiple star), and "V*"
@@ -47,6 +51,7 @@ class ResolutionResult:
 
 async def resolve_query(query_text: str) -> ResolutionResult:
     """Resolve a user query by consulting SIMBAD and optionally the exoplanet archive."""
+    resolve_started_at = time.perf_counter()
     # Normalize the text first so the same object is treated consistently across lookups.
     normalized_query = normalize_query(query_text)
     # NOTE: this is a single awaited call, not real concurrency -- the Exoplanet Archive
@@ -55,13 +60,16 @@ async def resolve_query(query_text: str) -> ResolutionResult:
     # deviation from the checklist's asyncio.gather suggestion). Wrapping a lone awaited
     # coroutine in create_task() just to immediately await it adds a task-scheduling
     # detour with no benefit, so call it directly instead.
+    simbad_started_at = time.perf_counter()
     try:
         simbad_result = await resolve_identity(normalized_query or query_text)
     except SimbadLookupError:
+        logger.info("SIMBAD stage: failed after %.3fs", time.perf_counter() - simbad_started_at)
         # SIMBAD couldn't be reached or its response couldn't be used -- this is a
         # network/service problem, not evidence that the object doesn't exist, so it
         # must not be reported as UNRESOLVED. See SimbadLookupError's docstring.
         return ResolutionResult(query_text=normalized_query or query_text, state="LOOKUP_FAILED")
+    logger.info("SIMBAD stage: completed in %.3fs", time.perf_counter() - simbad_started_at)
 
     if simbad_result is None:
         return ResolutionResult(query_text=normalized_query or query_text, state="UNRESOLVED")
@@ -93,6 +101,7 @@ async def resolve_query(query_text: str) -> ResolutionResult:
     # (e.g. two different catalog objects that happen to share a bare name once their
     # prefixes are removed) is astronomically unlikely within one star's own alias set,
     # since these are all aliases SIMBAD already asserts refer to the same object.
+    alias_expansion_started_at = time.perf_counter()
     expanded_candidates: list[str] = []
     seen: set[str] = set()
     for candidate in match_candidates:
@@ -101,9 +110,21 @@ async def resolve_query(query_text: str) -> ResolutionResult:
                 expanded_candidates.append(variant)
                 seen.add(variant)
     match_candidates = expanded_candidates
+    logger.info(
+        "Alias expansion stage: %d candidates in %.3fs",
+        len(match_candidates),
+        time.perf_counter() - alias_expansion_started_at,
+    )
 
     # Ask the exoplanet archive for planets only when there is something to check.
+    exoplanet_started_at = time.perf_counter()
     planets, matched_alias = await find_planets(match_candidates) if match_candidates else ([], None)
+    logger.info(
+        "Exoplanet Archive stage: completed in %.3fs (matched_alias=%r)",
+        time.perf_counter() - exoplanet_started_at,
+        matched_alias,
+    )
+    logger.info("resolve_query total: %.3fs for query_text=%r", time.perf_counter() - resolve_started_at, query_text)
 
     if planets:
         return ResolutionResult(

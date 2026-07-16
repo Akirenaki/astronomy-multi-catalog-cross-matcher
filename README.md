@@ -20,7 +20,7 @@ User types in an informal, human-typed star name ("51 Peg", "HD 217014", even sl
 
 1. **Normalises** the query (fixes whitespace/casing, canonicalizes catalog prefixes like HD/HIP/GJ/TYC without stripping them)
 2. **[Resolves](#a-resolve-explanation)** identity against SIMBAD (the standard astronomical object database) via a TAP/ADQL query, pulling the canonical name, coordinates, spectral type, and every known alias in one round trip
-3. **Cross-matches** those aliases against the NASA Exoplanet Archive to find any known planets orbiting that star
+3. **Cross-matches** those aliases against the NASA Exoplanet Archive in a single batched query (not one HTTP request per alias) to find any known planets orbiting that star
 4. **Classifies** the result into one of [five explicit states](#b-five-states-explanation) — `RESOLVED`, `PARTIAL`, `AMBIGUOUS`, `UNRESOLVED`, `LOOKUP_FAILED` — rather than quietly picking one answer or silently failing.
 5. **Caches** the result with a 14-day TTL (1 hour for failed/ambiguous lookups, so bugs self-heal quickly)
 6. **Generates** a plain-English AI narrative (via Gemini API) explaining the result for a non-specialist, kept strictly separate from and never able to corrupt the underlying scientific data
@@ -246,5 +246,3 @@ Was SIMBAD actually reachable, and did it return a usable response?
 ```
 
 **Each state is mutually exclusive and exhaustive** — every possible search outcome falls into exactly one bucket.
-
-</details>

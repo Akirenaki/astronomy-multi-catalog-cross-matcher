@@ -13,6 +13,14 @@ find_planets() always returned no planets no matter what the API actually said.
 test_resolver.py deliberately does NOT catch this class of bug, because it monkeypatches
 find_planets() itself rather than exercising the JSON-parsing code. These tests mock
 httpx one layer lower, at the response object, so the real parsing logic runs.
+
+This file also guards a second regression: find_planets() used to send one HTTP
+request per alias, in sequence. For a star with many SIMBAD aliases (e.g. Betelgeuse
+or Proxima Centauri, both 100+ cross-catalog identifiers), that meant potentially
+100+ sequential round trips before concluding "no planets", which was slow enough to
+time out an interactive search even though the app itself was still working. The
+tests below confirm aliases are now sent as a single batched `IN (...)` query per
+chunk instead.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -73,21 +81,56 @@ async def test_find_planets_returns_empty_for_genuinely_empty_array():
 
 
 @pytest.mark.asyncio
-async def test_find_planets_tries_next_alias_after_empty_result():
-    """First alias has no planets, second one does -- confirm the loop advances
-    correctly and reports which alias actually matched."""
-    empty_client = _fake_client([])
-    hit_payload = [{"pl_name": "Test b", "pl_letter": "b", "hostname": "Alias Two"}]
-    hit_client = _fake_client(hit_payload)
+async def test_find_planets_picks_first_alias_with_matching_rows_in_one_batch():
+    """Regression test for the batching rewrite: aliases are now sent as a single
+    `hostname IN (...)` query rather than one sequential request per alias. This test
+    confirms that when the batched response contains rows for a *later* alias in the
+    list (and nothing for an earlier one), the earlier alias's priority ordering is
+    still respected when picking `matched_alias` -- and that only ONE request was made
+    to cover both aliases, not two."""
+    # Only "Alias Two" has matching rows in the archive; "Alias One" has none. Both are
+    # returned (or not) from the same single batched response.
+    payload = [{"pl_name": "Test b", "pl_letter": "b", "hostname": "Alias Two"}]
 
-    calls = {"n": 0}
-
-    def client_factory(*args, **kwargs):
-        calls["n"] += 1
-        return empty_client if calls["n"] == 1 else hit_client
-
-    with patch("httpx.AsyncClient", side_effect=client_factory):
+    client = _fake_client(payload)
+    with patch("httpx.AsyncClient", return_value=client) as client_ctor:
         planets, matched_alias = await find_planets(["Alias One", "Alias Two"])
 
     assert matched_alias == "Alias Two"
     assert planets[0]["pl_name"] == "Test b"
+    # The core regression: exactly one HTTP request for both aliases, not one per alias.
+    assert client_ctor.call_count == 1
+    assert client.post.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_find_planets_query_contains_every_alias_in_one_in_clause():
+    """The batched query string itself should reference every alias passed in, so
+    a star with many aliases still gets checked in a single round trip."""
+    client = _fake_client([])
+    with patch("httpx.AsyncClient", return_value=client):
+        await find_planets(["HD 217014", "HIP 113357", "51 Peg"])
+
+    sent_query = client.post.await_args.kwargs["data"]["query"]
+    for alias in ("HD 217014", "HIP 113357", "51 Peg"):
+        assert alias in sent_query
+
+
+@pytest.mark.asyncio
+async def test_find_planets_chunks_very_large_alias_lists():
+    """A star with more aliases than fit in one batch (e.g. Betelgeuse or Proxima
+    Centauri, which each carry 100+ SIMBAD cross-identifications) must still be fully
+    checked -- split across multiple batched requests rather than truncated or sent as
+    one arbitrarily long query string."""
+    from app.catalogs import exoplanet_archive as module
+
+    many_aliases = [f"Alias {i}" for i in range(module._BATCH_SIZE + 5)]
+    client = _fake_client([])
+
+    with patch("httpx.AsyncClient", return_value=client) as client_ctor:
+        planets, matched_alias = await find_planets(many_aliases)
+
+    assert planets == []
+    assert matched_alias is None
+    # _BATCH_SIZE + 5 aliases, batches of _BATCH_SIZE, should be exactly 2 requests.
+    assert client_ctor.call_count == 2

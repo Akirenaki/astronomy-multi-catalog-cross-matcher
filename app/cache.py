@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -13,6 +15,8 @@ from app.models import ObjectRecord, IdentifierRecord, PlanetRecord
 from app.narrative import generate_summary
 from app.resolver import ResolutionResult, resolve_query
 from app.catalogs.simbad import normalize_query
+
+logger = logging.getLogger(__name__)
 
 
 async def get_cached(query_text: str) -> ObjectRecord | None:
@@ -138,9 +142,11 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
             }
             record.ai_summary = await generate_summary(summary_payload)
 
+        commit_started_at = time.perf_counter()
         try:
             await session.commit()
         except IntegrityError:
+            logger.info("Database commit stage: failed (IntegrityError) after %.3fs", time.perf_counter() - commit_started_at)
             # The candidate_rows lookup above is a check-then-act sequence: two concurrent
             # get_or_resolve() calls for the same brand-new star (e.g. a double-click, two
             # browser tabs, or two workers) can both find zero existing rows and both reach
@@ -165,6 +171,7 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
             # failed commit and this re-query), but re-raise rather than returning None from
             # a function whose return type promises an ObjectRecord.
             raise
+        logger.info("Database commit stage: completed in %.3fs", time.perf_counter() - commit_started_at)
 
         # session.refresh() only reloads column attributes, not relationships, so a plain
         # refresh() here still leaves .identifiers/.planets unloaded and detached once the
