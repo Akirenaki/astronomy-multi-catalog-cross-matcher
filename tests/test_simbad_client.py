@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from app.catalogs.simbad import resolve_identity
+from app.catalogs.simbad import SimbadLookupError, resolve_identity
 
 
 def _fake_client(json_body):
@@ -99,8 +99,13 @@ async def test_resolve_identity_returns_none_for_genuinely_empty_envelope():
 
 
 @pytest.mark.asyncio
-async def test_resolve_identity_returns_none_on_connect_timeout():
-    """SIMBAD transport timeouts should be treated as a soft failure, not a traceback."""
+async def test_resolve_identity_raises_lookup_error_on_connect_timeout():
+    """SIMBAD transport timeouts must be distinguishable from a genuine no-match.
+
+    Regression test: this used to return None on a timeout, which was indistinguishable
+    from "SIMBAD was reached and has no record of this object" -- silently reporting a
+    firewalled or unreachable network as UNRESOLVED. It must now raise SimbadLookupError
+    so the resolver can report it as LOOKUP_FAILED instead."""
     client = _fake_client({})
     client.post.side_effect = httpx.ConnectTimeout(
         "connect timed out",
@@ -108,6 +113,25 @@ async def test_resolve_identity_returns_none_on_connect_timeout():
     )
 
     with patch("httpx.AsyncClient", return_value=client):
-        result = await resolve_identity("51 Peg")
+        with pytest.raises(SimbadLookupError):
+            await resolve_identity("51 Peg")
 
-    assert result is None
+
+@pytest.mark.asyncio
+async def test_resolve_identity_raises_lookup_error_on_http_status_error():
+    """A bad HTTP status (e.g. SIMBAD returning a 503) is also a service-reachability
+    problem, not a genuine no-match, and must raise the same way as a timeout."""
+    request = httpx.Request("POST", "https://simbad.cds.unistra.fr/simbad/sim-tap/sync")
+    response = MagicMock()
+    response.raise_for_status = MagicMock(
+        side_effect=httpx.HTTPStatusError("service unavailable", request=request, response=MagicMock(status_code=503))
+    )
+
+    client = AsyncMock()
+    client.__aenter__.return_value = client
+    client.__aexit__.return_value = False
+    client.post = AsyncMock(return_value=response)
+
+    with patch("httpx.AsyncClient", return_value=client):
+        with pytest.raises(SimbadLookupError):
+            await resolve_identity("51 Peg")

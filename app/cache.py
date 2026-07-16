@@ -94,8 +94,10 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
         session.add(record)
         await session.flush()
 
-        # Unresolved and ambiguous requests should expire quickly so later fixes can be picked up.
-        if resolution_result.state in ("UNRESOLVED", "AMBIGUOUS"):
+        # Unresolved, ambiguous, and failed-lookup requests should expire quickly so
+        # later fixes -- or simply a working network connection -- can be picked up
+        # without waiting out the full 14-day TTL used for confirmed results.
+        if resolution_result.state in ("UNRESOLVED", "AMBIGUOUS", "LOOKUP_FAILED"):
             record.expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
 
         # Store each alias reported by SIMBAD as an identifier row.
@@ -123,8 +125,10 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
                 )
             )
 
-        # AI summaries are skipped for unresolved/ambiguous results because they do not represent a confirmed object.
-        if generate_ai_summary and resolution_result.state not in ("UNRESOLVED", "AMBIGUOUS"):
+        # AI summaries are skipped for unresolved/ambiguous/failed-lookup results because
+        # they do not represent a confirmed object -- and for LOOKUP_FAILED specifically,
+        # there is no structured data yet for the narrative layer to safely describe.
+        if generate_ai_summary and resolution_result.state not in ("UNRESOLVED", "AMBIGUOUS", "LOOKUP_FAILED"):
             summary_payload = {
                 "state": resolution_result.state,
                 "main_id": resolution_result.main_id,

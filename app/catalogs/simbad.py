@@ -9,6 +9,17 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+class SimbadLookupError(Exception):
+    """Raised when a SIMBAD request could not be completed -- a transport failure
+    (timeout, connection refused, DNS failure), a bad HTTP status, or a response body
+    that couldn't be parsed. This is deliberately distinct from resolve_identity()
+    returning None, which means "SIMBAD was reached and genuinely has no match for
+    this query." Collapsing both cases into None previously made a firewalled network
+    indistinguishable from a nonexistent star -- see resolver.py's handling of this
+    exception for how the two are now reported separately as LOOKUP_FAILED vs
+    UNRESOLVED."""
+
+
 def normalize_query(query_text: str) -> str:
     """Clean up whitespace/casing and canonicalize catalog-prefixed identifiers.
 
@@ -34,7 +45,12 @@ def normalize_query(query_text: str) -> str:
 
 
 async def resolve_identity(query_text: str) -> dict | list[dict] | None:
-    """Query SIMBAD for an object identity and return either one candidate or a list of candidates."""
+    """Query SIMBAD for an object identity and return either one candidate or a list of candidates.
+
+    Returns None only when SIMBAD was successfully reached and genuinely has no match
+    for this query. Raises SimbadLookupError when the request itself couldn't be
+    completed (timeout, transport error, bad status, unparseable response) -- the
+    caller should not treat that case as "no match found"."""
     normalized = normalize_query(query_text)
     if not normalized:
         return None
@@ -70,22 +86,24 @@ async def resolve_identity(query_text: str) -> dict | list[dict] | None:
             )
             response.raise_for_status()
             json_data = response.json()
-    except httpx.TimeoutException:
-        # Network timeouts are expected to happen occasionally and should degrade to
-        # an unresolved lookup instead of spamming the logs with a traceback.
+    except httpx.TimeoutException as exc:
+        # A timeout means SIMBAD was never actually reached -- this is a network/
+        # environment problem (firewalled host, dead route, DNS issue), not evidence
+        # that the object doesn't exist. Raise rather than returning None so the
+        # caller can report this honestly instead of as an "unresolved" star.
         logger.warning("SIMBAD lookup timed out for query_text=%r", normalized)
-        return None
-    except httpx.HTTPError:
-        # Any other HTTP transport or status-layer issue is treated as "no identity
-        # found" for this request -- but log it so transient outages are still visible
-        # during debugging.
+        raise SimbadLookupError(f"SIMBAD lookup timed out for {normalized!r}") from exc
+    except httpx.HTTPError as exc:
+        # Any other HTTP transport or status-layer issue (connection refused, DNS
+        # failure, a 4xx/5xx from raise_for_status()) is likewise a service-reachability
+        # problem, not a genuine "no match" -- log it and raise the same way.
         logger.warning("SIMBAD lookup failed for query_text=%r", normalized, exc_info=True)
-        return None
-    except Exception:
-        # Any non-HTTP formatting issue is also treated as "no identity found" for
-        # this request -- but log it first.
+        raise SimbadLookupError(f"SIMBAD lookup failed for {normalized!r}") from exc
+    except Exception as exc:
+        # A response that can't be parsed at all is also a service-side problem
+        # (e.g. SIMBAD changed its response shape) rather than a real "not found".
         logger.warning("SIMBAD lookup failed for query_text=%r", normalized, exc_info=True)
-        return None
+        raise SimbadLookupError(f"SIMBAD lookup failed for {normalized!r}") from exc
 
     rows: list[dict[str, Any]] = []
     if isinstance(json_data, dict):

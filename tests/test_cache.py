@@ -72,6 +72,29 @@ async def test_ambiguous_result_persists_candidates(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_lookup_failed_gets_short_ttl_and_no_summary(monkeypatch):
+    """A SIMBAD lookup that failed outright (timeout/transport error) must be cached
+    the same self-healing way as UNRESOLVED/AMBIGUOUS: a short TTL so it's retried
+    soon (e.g. once the network issue clears) rather than sitting stale for 14 days,
+    and no AI summary, since there is no confirmed structured data to describe."""
+    from app.catalogs.simbad import SimbadLookupError
+
+    async def failing_simbad(query_text: str):
+        raise SimbadLookupError("simulated network failure")
+
+    monkeypatch.setattr("app.resolver.resolve_identity", failing_simbad)
+    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None)))
+
+    record = await cache_mod.get_or_resolve("HD 217014 Lookup Failed Test")
+
+    assert record.resolution_state == "LOOKUP_FAILED"
+    assert record.ai_summary is None
+
+    remaining = record.expires_at.replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)
+    assert remaining.total_seconds() < 2 * 60 * 60
+
+
+@pytest.mark.asyncio
 async def test_ambiguous_candidates_survive_a_cache_hit(monkeypatch):
     """Re-searching within the TTL window should serve the cached candidate
     list rather than dropping it on the second lookup."""

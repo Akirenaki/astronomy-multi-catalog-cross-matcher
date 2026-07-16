@@ -2,6 +2,7 @@
 
 import pytest
 
+from app.catalogs.simbad import SimbadLookupError
 from app.resolver import resolve_query
 
 
@@ -22,6 +23,28 @@ async def test_resolver_returns_unresolved_when_simbad_has_no_match(monkeypatch)
     assert result.state == "UNRESOLVED"
     assert result.planets == []
     assert result.aliases == []
+
+
+@pytest.mark.asyncio
+async def test_resolver_returns_lookup_failed_when_simbad_is_unreachable(monkeypatch):
+    """Core regression test for the network-vs-no-match distinction: when SIMBAD itself
+    can't be reached (timeout, transport error, etc.), resolve_query() must report
+    LOOKUP_FAILED, not UNRESOLVED -- the latter would falsely claim SIMBAD was checked
+    and has no record of the object."""
+
+    async def fake_simbad(query_text: str):
+        raise SimbadLookupError("simulated network failure")
+
+    async def fake_planets(alias_list):
+        raise AssertionError("find_planets should never be called when SIMBAD couldn't be reached")
+
+    monkeypatch.setattr("app.resolver.resolve_identity", fake_simbad)
+    monkeypatch.setattr("app.resolver.find_planets", fake_planets)
+
+    result = await resolve_query("HD 217014")
+
+    assert result.state == "LOOKUP_FAILED"
+    assert result.planets == []
 
 
 @pytest.mark.asyncio

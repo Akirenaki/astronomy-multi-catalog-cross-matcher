@@ -38,6 +38,24 @@
             <p>No candidate details were retained for this search.</p>
           {% endif %}
         </div>
+      {% elif object.resolution_state == 'LOOKUP_FAILED' %}
+        <div class="panel">
+          <h2>Couldn't reach SIMBAD</h2>
+          <p>
+            This query couldn't be resolved because the SIMBAD lookup itself failed —
+            a timeout, connection problem, or an unreadable response — not because
+            "{{ object.query_text }}" is a known non-match. This is different from
+            UNRESOLVED, which means SIMBAD was reached and genuinely has no record
+            for the query.
+          </p>
+          <p>
+            This is often caused by a network that blocks or can't route to
+            <code>simbad.cds.unistra.fr</code> (school/work networks and some
+            containerized dev environments commonly do this). Try again from a
+            different network, or retry now in case it was transient:
+          </p>
+          <p><a href="/search?q={{ object.query_text | urlencode }}">Retry this search</a></p>
+        </div>
       {% else %}
         <p><span class="label">Main ID:</span> {{ object.simbad_main_id or '—' }}</p>
         <p><span class="label">Spectral type:</span> {{ object.spectral_type or '—' }}</p>
@@ -58,10 +76,12 @@
             <p>No SIMBAD match was found for this query.</p>
           {% endif %}
         </div>
-        <div class="panel" style="margin-top:1rem;">
-          <h2>AI-generated summary</h2>
-          <p>{{ summary }}</p>
-        </div>
+        {% if object.resolution_state in ('RESOLVED', 'PARTIAL') %}
+          <div class="panel" style="margin-top:1rem;">
+            <h2>AI-generated summary</h2>
+            <p>{{ summary }}</p>
+          </div>
+        {% endif %}
       {% endif %}
     {% else %}
       <p>No object found.</p>

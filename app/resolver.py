@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.catalogs.exoplanet_archive import find_planets
-from app.catalogs.simbad import normalize_query, resolve_identity
+from app.catalogs.simbad import SimbadLookupError, normalize_query, resolve_identity
 
 # SIMBAD prefixes its main_id/aliases with a type-classifier token for many object
 # categories -- most commonly "*" (star), "**" (double/multiple star), and "V*"
@@ -55,7 +55,13 @@ async def resolve_query(query_text: str) -> ResolutionResult:
     # deviation from the checklist's asyncio.gather suggestion). Wrapping a lone awaited
     # coroutine in create_task() just to immediately await it adds a task-scheduling
     # detour with no benefit, so call it directly instead.
-    simbad_result = await resolve_identity(normalized_query or query_text)
+    try:
+        simbad_result = await resolve_identity(normalized_query or query_text)
+    except SimbadLookupError:
+        # SIMBAD couldn't be reached or its response couldn't be used -- this is a
+        # network/service problem, not evidence that the object doesn't exist, so it
+        # must not be reported as UNRESOLVED. See SimbadLookupError's docstring.
+        return ResolutionResult(query_text=normalized_query or query_text, state="LOOKUP_FAILED")
 
     if simbad_result is None:
         return ResolutionResult(query_text=normalized_query or query_text, state="UNRESOLVED")

@@ -41,7 +41,7 @@ class ObjectRecord(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "resolution_state IN ('RESOLVED','AMBIGUOUS','PARTIAL','UNRESOLVED')",
+            "resolution_state IN ('RESOLVED','AMBIGUOUS','PARTIAL','UNRESOLVED','LOOKUP_FAILED')",
             name="ck_resolution_state",
         ),
     )
