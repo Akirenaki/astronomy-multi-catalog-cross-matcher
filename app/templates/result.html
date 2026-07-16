@@ -9,6 +9,16 @@
     .card { border: 1px solid #ddd; padding: 1rem; border-radius: 8px; max-width: 900px; margin-bottom: 1rem; }
     .panel { background: #f8f9fa; padding: 1rem; border-radius: 6px; }
     .label { font-weight: bold; }
+    /* AI summary loading indicator: three dots that fade in and out in sequence,
+       rendered while the client-side fetch in the script below is in flight. */
+    .ai-summary-loading { color: #666; font-style: italic; }
+    .ai-summary-loading .dot { animation: ai-summary-dot-fade 1.4s infinite both; }
+    .ai-summary-loading .dot:nth-child(2) { animation-delay: 0.2s; }
+    .ai-summary-loading .dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes ai-summary-dot-fade {
+      0%, 80%, 100% { opacity: 0; }
+      40% { opacity: 1; }
+    }
   </style>
 </head>
 <body>
@@ -77,9 +87,15 @@
           {% endif %}
         </div>
         {% if object.resolution_state in ('RESOLVED', 'PARTIAL') %}
-          <div class="panel" style="margin-top:1rem;">
+          <div class="panel" style="margin-top:1rem;" id="ai-summary-panel" data-simbad-id="{{ object.simbad_main_id }}">
             <h2>AI-generated summary</h2>
-            <p>{{ summary }}</p>
+            {% if object.ai_summary %}
+              <p id="ai-summary-text">{{ object.ai_summary }}</p>
+            {% else %}
+              <p id="ai-summary-text" class="ai-summary-loading">
+                Generating summary<span class="dot">.</span><span class="dot">.</span><span class="dot">.</span>
+              </p>
+            {% endif %}
           </div>
         {% endif %}
       {% endif %}
@@ -88,5 +104,36 @@
     {% endif %}
     <p><a href="/">Back to search</a></p>
   </div>
+  <script>
+    // Fills in the AI-generated summary after the rest of the page has already
+    // rendered -- the same "results first, AI overview second" pattern search
+    // engines use, so a slow Gemini call never blocks the data the user actually
+    // came here for. Only runs when the server rendered the loading placeholder
+    // (i.e. no summary was cached yet); a page that already has a real summary
+    // server-rendered skips this entirely, so repeat views don't re-spend quota.
+    (function () {
+      var panel = document.getElementById('ai-summary-panel');
+      if (!panel) return;
+      var textEl = document.getElementById('ai-summary-text');
+      if (!textEl || !textEl.classList.contains('ai-summary-loading')) return;
+
+      var simbadId = panel.getAttribute('data-simbad-id');
+      if (!simbadId) return;
+
+      fetch('/object/' + encodeURIComponent(simbadId) + '/summary')
+        .then(function (response) {
+          if (!response.ok) throw new Error('Request failed: ' + response.status);
+          return response.json();
+        })
+        .then(function (data) {
+          textEl.textContent = data.summary || 'No summary available.';
+          textEl.classList.remove('ai-summary-loading');
+        })
+        .catch(function () {
+          textEl.textContent = 'Could not load the AI summary. Refresh the page to try again.';
+          textEl.classList.remove('ai-summary-loading');
+        });
+    })();
+  </script>
 </body>
 </html>

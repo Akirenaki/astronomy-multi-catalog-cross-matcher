@@ -156,3 +156,111 @@ async def test_resolved_record_relationships_readable_after_session_closes(monke
     cached_record = await cache_mod.get_or_resolve("51 Peg Relationship Test")
     assert len(cached_record.identifiers) == 1
     assert len(cached_record.planets) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_or_resolve_generate_ai_summary_false_skips_gemini(monkeypatch):
+    """Regression test for the data-first loading UX: get_or_resolve(...,
+    generate_ai_summary=False) must render/store the object without calling Gemini at
+    all, so /search can return as soon as SIMBAD + the Exoplanet Archive respond,
+    instead of also waiting on the (sometimes ~42s) narrative call."""
+    monkeypatch.setattr(
+        "app.resolver.resolve_identity",
+        AsyncMock(
+            return_value={
+                "main_id": "* alf Ori",
+                "ra": 88.79,
+                "dec": 7.41,
+                "otype": "Star",
+                "sp_type": "M1-M2Ia-Iab",
+                "aliases": ["Betelgeuse"],
+            }
+        ),
+    )
+    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None)))
+    summary_mock = AsyncMock(return_value="should not be called")
+    monkeypatch.setattr("app.cache.generate_summary", summary_mock)
+
+    record = await cache_mod.get_or_resolve("Betelgeuse Deferred Summary Test", generate_ai_summary=False)
+
+    assert record.resolution_state == "PARTIAL"
+    assert record.ai_summary is None
+    summary_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_ai_summary_generates_and_persists_once(monkeypatch):
+    """ensure_ai_summary() is the endpoint the frontend polls after the main page has
+    already rendered. It must: generate the summary on first call, persist it, and
+    NOT call Gemini again on a second call for the same object (repeated page views /
+    accidental double-fetches shouldn't burn quota re-generating an unchanged result)."""
+    monkeypatch.setattr(
+        "app.resolver.resolve_identity",
+        AsyncMock(
+            return_value={
+                "main_id": "* alf Ori",
+                "ra": 88.79,
+                "dec": 7.41,
+                "otype": "Star",
+                "sp_type": "M1-M2Ia-Iab",
+                "aliases": ["Betelgeuse"],
+            }
+        ),
+    )
+    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None)))
+    summary_mock = AsyncMock(return_value="Betelgeuse is a huge red star with no known planets.")
+    monkeypatch.setattr("app.cache.generate_summary", summary_mock)
+
+    record = await cache_mod.get_or_resolve("Ensure Summary Test", generate_ai_summary=False)
+    assert record.ai_summary is None  # confirms the deferred-generation precondition
+
+    first = await cache_mod.ensure_ai_summary(record.simbad_main_id)
+    second = await cache_mod.ensure_ai_summary(record.simbad_main_id)
+
+    assert first == "Betelgeuse is a huge red star with no known planets."
+    assert second == first
+    summary_mock.assert_awaited_once()
+
+    persisted = await cache_mod.get_object_by_simbad_id(record.simbad_main_id)
+    assert persisted.ai_summary == first
+
+
+@pytest.mark.asyncio
+async def test_ensure_ai_summary_skips_gemini_for_non_confirmed_states(monkeypatch):
+    """Mirrors store_result()'s own skip rule: AMBIGUOUS/UNRESOLVED/LOOKUP_FAILED have
+    no confirmed structured data, so ensure_ai_summary() must not call Gemini for such
+    a row even if something requests it. In practice these states never get a
+    simbad_main_id from the real resolve pipeline, so this test inserts the row
+    directly to exercise that branch on its own, independent of the resolver."""
+    from datetime import timedelta
+
+    from app.database import SessionLocal
+    from app.models import ObjectRecord
+
+    async with SessionLocal() as session:
+        session.add(
+            ObjectRecord(
+                query_text="Directly Inserted Unresolved Row",
+                simbad_main_id="Synthetic Test Id",
+                resolution_state="UNRESOLVED",
+                resolved_at=datetime.now(timezone.utc),
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            )
+        )
+        await session.commit()
+
+    summary_mock = AsyncMock(return_value="should not be called")
+    monkeypatch.setattr("app.cache.generate_summary", summary_mock)
+
+    result = await cache_mod.ensure_ai_summary("Synthetic Test Id")
+
+    assert result == "No summary available."
+    summary_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_ai_summary_raises_lookup_error_for_unknown_id():
+    """A request for a summary of an id that was never resolved (typo'd URL, stale
+    link, etc.) must raise, not silently fabricate a response."""
+    with pytest.raises(LookupError):
+        await cache_mod.ensure_ai_summary("this-id-does-not-exist")

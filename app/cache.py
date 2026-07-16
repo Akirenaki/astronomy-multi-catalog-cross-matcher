@@ -185,14 +185,68 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
         return result.scalar_one()
 
 
-async def get_or_resolve(query_text: str) -> ObjectRecord:
-    """Serve a cached result when possible, otherwise resolve the query and store it."""
+async def get_or_resolve(query_text: str, *, generate_ai_summary: bool = True) -> ObjectRecord:
+    """Serve a cached result when possible, otherwise resolve the query and store it.
+
+    generate_ai_summary is forwarded to store_result() for a brand-new resolution; it
+    has no effect on a cache hit, since get_cached() returns whatever was already
+    persisted (summary present or not) without touching Gemini either way.
+    """
     cached = await get_cached(query_text)
     if cached is not None:
         return cached
 
     result = await resolve_query(query_text)
-    return await store_result(result)
+    return await store_result(result, generate_ai_summary=generate_ai_summary)
+
+
+async def ensure_ai_summary(simbad_main_id: str) -> str:
+    """Generate (if not already cached) and persist the AI narrative for an
+    already-resolved object, then return it.
+
+    This is called lazily by result.html's client-side JS, via GET
+    /object/{id}/summary, strictly *after* the main result page has already rendered
+    with the scientific data -- mirroring the "results first, AI overview second"
+    pattern search engines use, so a slow Gemini call (a live query for a
+    heavily-catalogued star was observed taking ~42s for this call alone) never
+    blocks the page the user is actually waiting on.
+
+    Raises LookupError if no object exists for this SIMBAD main ID.
+    """
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(ObjectRecord)
+            .options(selectinload(ObjectRecord.planets))
+            .where(ObjectRecord.simbad_main_id == simbad_main_id)
+        )
+        record = result.scalar_one_or_none()
+        if record is None:
+            raise LookupError(f"No object found for simbad_main_id={simbad_main_id!r}")
+
+        if record.ai_summary:
+            # Already generated -- either by a previous call to this same function, or
+            # by store_result() directly for any caller still using the blocking
+            # default. Returning the cached value means repeated polls/page views
+            # never re-spend Gemini quota on the same object.
+            return record.ai_summary
+
+        if record.resolution_state not in ("RESOLVED", "PARTIAL"):
+            # Mirrors store_result()'s own skip condition: AMBIGUOUS/UNRESOLVED/
+            # LOOKUP_FAILED have no confirmed structured data to summarize.
+            return "No summary available."
+
+        summary_payload = {
+            "state": record.resolution_state,
+            "main_id": record.simbad_main_id,
+            "spectral_type": record.spectral_type,
+            "planet_count": len(record.planets),
+            "planets": [planet.to_dict() for planet in record.planets],
+        }
+        summary = await generate_summary(summary_payload)
+
+        record.ai_summary = summary
+        await session.commit()
+        return summary
 
 
 async def get_object_by_simbad_id(simbad_main_id: str) -> ObjectRecord | None:

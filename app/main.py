@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from jinja2 import Environment, FileSystemLoader
 
-from app.cache import get_object_by_simbad_id, get_or_resolve, list_recent_objects
+from app.cache import ensure_ai_summary, get_object_by_simbad_id, get_or_resolve, list_recent_objects
 from app.database import init_db
 
 # uvicorn's default logging config only sets up its own "uvicorn"/"uvicorn.error"/
@@ -53,9 +53,14 @@ async def search(request: Request, q: str | None = None) -> HTMLResponse:
         return HTMLResponse(content=html)
 
     # Resolve the query through the cache/resolver pipeline and render the result page.
-    result = await get_or_resolve(q)
+    # generate_ai_summary=False: render the scientific data immediately rather than
+    # blocking the whole page on the Gemini call (observed taking up to ~42s for a
+    # single heavily-catalogued star). The AI summary panel is filled in afterward by
+    # result.html's client-side JS calling GET /object/{id}/summary -- the same
+    # "results first, AI overview second" pattern search engines use.
+    result = await get_or_resolve(q, generate_ai_summary=False)
     template = env.get_template("result.html")
-    html = template.render(request=request, object=result, summary=result.ai_summary or "No summary available.")
+    html = template.render(request=request, object=result)
     return HTMLResponse(content=html)
 
 
@@ -69,10 +74,26 @@ async def object_profile(request: Request, simbad_main_id: str) -> HTMLResponse:
     """
     obj = await get_object_by_simbad_id(simbad_main_id)
     if obj is None:
-        obj = await get_or_resolve(simbad_main_id)
+        obj = await get_or_resolve(simbad_main_id, generate_ai_summary=False)
     template = env.get_template("result.html")
-    html = template.render(request=request, object=obj, summary=obj.ai_summary if obj else "No summary available.")
+    html = template.render(request=request, object=obj)
     return HTMLResponse(content=html)
+
+
+@app.get("/object/{simbad_main_id}/summary")
+async def object_summary(simbad_main_id: str) -> JSONResponse:
+    """Lazily generate (or return the already-cached) AI narrative for an object.
+
+    Called by result.html's client-side JS strictly after the main page has already
+    rendered with the scientific data, so a slow Gemini call never blocks the page
+    the user is actually waiting on. See ensure_ai_summary()'s docstring for the
+    caching/skip rules this follows.
+    """
+    try:
+        summary = await ensure_ai_summary(simbad_main_id)
+    except LookupError:
+        return JSONResponse({"error": "Object not found"}, status_code=404)
+    return JSONResponse({"summary": summary})
 
 
 @app.get("/api/resolve")
