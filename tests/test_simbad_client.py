@@ -17,6 +17,7 @@ httpx one layer lower, at the response object, so the real parsing logic runs.
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from app.catalogs.simbad import resolve_identity
@@ -93,5 +94,20 @@ async def test_resolve_identity_returns_none_for_genuinely_empty_envelope():
     payload = _tap_envelope([])
     with patch("httpx.AsyncClient", return_value=_fake_client(payload)):
         result = await resolve_identity("asdkfjhasdf")
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_identity_returns_none_on_connect_timeout():
+    """SIMBAD transport timeouts should be treated as a soft failure, not a traceback."""
+    client = _fake_client({})
+    client.post.side_effect = httpx.ConnectTimeout(
+        "connect timed out",
+        request=httpx.Request("POST", "https://simbad.cds.unistra.fr/simbad/sim-tap/sync"),
+    )
+
+    with patch("httpx.AsyncClient", return_value=client):
+        result = await resolve_identity("51 Peg")
 
     assert result is None

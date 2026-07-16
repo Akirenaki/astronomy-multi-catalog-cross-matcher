@@ -60,8 +60,8 @@ async def resolve_identity(query_text: str) -> dict | list[dict] | None:
         # (firewalled, DNS issue, dead route) still takes up to 20s to fail, which is
         # indistinguishable from "the server is just slow" while debugging. Splitting
         # these lets a connection failure surface in ~5s while still giving a legitimately
-        # slow-but-reachable SIMBAD response the full 20s to complete.
-        timeout = httpx.Timeout(connect=5.0, read=20.0, write=10.0, pool=5.0)
+        # slow-but-reachable SIMBAD response the full 60s to complete.
+        timeout = httpx.Timeout(connect=10.0, read=60.0, write=15.0, pool=10.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 "https://simbad.cds.unistra.fr/simbad/sim-tap/sync",
@@ -70,13 +70,20 @@ async def resolve_identity(query_text: str) -> dict | list[dict] | None:
             )
             response.raise_for_status()
             json_data = response.json()
+    except httpx.TimeoutException:
+        # Network timeouts are expected to happen occasionally and should degrade to
+        # an unresolved lookup instead of spamming the logs with a traceback.
+        logger.warning("SIMBAD lookup timed out for query_text=%r", normalized)
+        return None
+    except httpx.HTTPError:
+        # Any other HTTP transport or status-layer issue is treated as "no identity
+        # found" for this request -- but log it so transient outages are still visible
+        # during debugging.
+        logger.warning("SIMBAD lookup failed for query_text=%r", normalized, exc_info=True)
+        return None
     except Exception:
-        # Any network or formatting issue is treated as "no identity found" for this
-        # request -- but log it first. Without this, a genuine "SIMBAD has never heard
-        # of this name" and a transient network/rate-limit failure (SIMBAD blocks
-        # bursts above ~5-10 req/sec) both surface identically as UNRESOLVED, which
-        # makes a real gap in the resolver indistinguishable from a self-inflicted
-        # rate limit during a quick round of manual testing.
+        # Any non-HTTP formatting issue is also treated as "no identity found" for
+        # this request -- but log it first.
         logger.warning("SIMBAD lookup failed for query_text=%r", normalized, exc_info=True)
         return None
 
