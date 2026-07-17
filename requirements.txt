@@ -7,5 +7,6 @@ aiosqlite
 jinja2
 google-genai
 python-dotenv
+markdown-it-py
 pytest
 pytest-asyncio

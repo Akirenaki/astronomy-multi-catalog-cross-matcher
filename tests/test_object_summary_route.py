@@ -67,7 +67,7 @@ def test_search_renders_generate_button_without_calling_gemini(monkeypatch):
     assert 'id="generate-summary-btn"' in response.text
     assert 'data-simbad-id="* alf Ori"' in response.text
     # ...the loading placeholder must be hidden until the button is clicked...
-    assert 'class="ai-summary-loading" style="display:none;"' in response.text
+    assert 'class="ai-summary-loading ai-summary-content" style="display:none;"' in response.text
     # ...and no Regenerate control should exist yet, since there's no summary at all.
     assert 'id="regenerate-summary-btn"' not in response.text
     # ...and Gemini must genuinely not have been called to produce this response.
@@ -105,8 +105,38 @@ def test_object_summary_route_generates_and_returns_json(monkeypatch):
         summary_response = client.get(f"/object/{quote('* alf Ori', safe='')}/summary")
 
     assert summary_response.status_code == 200
-    assert summary_response.json() == {"summary": "Betelgeuse is a huge red star with no known planets."}
+    assert summary_response.json() == {
+        "summary": "Betelgeuse is a huge red star with no known planets.",
+        "summary_html": "<p>Betelgeuse is a huge red star with no known planets.</p>\n",
+    }
     summary_mock.assert_awaited_once()
+
+
+def test_object_summary_route_returns_rendered_markdown(monkeypatch):
+    """Markdown output from Gemini should render into HTML for the browser."""
+    monkeypatch.setattr(
+        "app.resolver.resolve_identity",
+        AsyncMock(
+            return_value={
+                "main_id": "* alf Ori",
+                "ra": 88.79,
+                "dec": 7.41,
+                "otype": "Star",
+                "sp_type": "M1-M2Ia-Iab",
+                "aliases": ["Betelgeuse"],
+            }
+        ),
+    )
+    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None)))
+    monkeypatch.setattr("app.cache.generate_summary", AsyncMock(return_value="Betelgeuse is **bright**."))
+
+    with TestClient(app) as client:
+        client.get("/search?q=Betelgeuse")
+        summary_response = client.get(f"/object/{quote('* alf Ori', safe='')}/summary")
+        profile_response = client.get(f"/object/{quote('* alf Ori', safe='')}")
+
+    assert "<strong>bright</strong>" in summary_response.json()["summary_html"]
+    assert "<strong>bright</strong>" in profile_response.text
 
 
 def test_object_profile_renders_regenerate_button_when_summary_exists(monkeypatch):

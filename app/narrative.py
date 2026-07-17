@@ -1,11 +1,15 @@
 """Natural-language summary generation for resolved object lookups."""
 
+from __future__ import annotations
+
+import json
 import logging
 import os
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
+from markupsafe import Markup
 
 try:
     from google import genai
@@ -18,7 +22,71 @@ except ImportError:  # pragma: no cover - exercised when the optional dependency
 
         pass
 
+try:
+    from markdown_it import MarkdownIt
+except ImportError:  # pragma: no cover - the dependency is expected in production
+    MarkdownIt = None
+
 logger = logging.getLogger(__name__)
+
+SUMMARY_PROMPT = (
+    "You are an astronomy professor writing for a general audience. "
+    "Write a precise, analytical, and professional summary in Markdown. "
+    "Prioritise accuracy over persuasion. Avoid excessive enthusiasm, "
+    "motivational language, or unnecessary reassurance. Explain reasoning "
+    "explicitly, distinguish facts from assumptions, and acknowledge "
+    "uncertainty where appropriate. Use concise but complete paragraphs "
+    "rather than overly short responses. Avoid rhetorical flourishes and "
+    "exaggerated praise. Maintain a cordial but objective tone. "
+    "Do not mention internal pipeline states, resolution labels, or database "
+    "implementation details. Do not use headings or code fences."
+)
+
+_markdown_renderer = MarkdownIt("commonmark", {"html": False}) if MarkdownIt is not None else None
+
+
+def _format_planet(planet: dict[str, Any]) -> str:
+    parts: list[str] = []
+    if planet.get("pl_name"):
+        parts.append(f"name: {planet['pl_name']}")
+    if planet.get("pl_letter"):
+        parts.append(f"letter: {planet['pl_letter']}")
+    if planet.get("orbital_period_days") is not None:
+        parts.append(f"orbital period (days): {planet['orbital_period_days']}")
+    if planet.get("planet_radius_earth") is not None:
+        parts.append(f"radius (Earths): {planet['planet_radius_earth']}")
+    if planet.get("discovery_year") is not None:
+        parts.append(f"discovery year: {planet['discovery_year']}")
+    if planet.get("discovery_method"):
+        parts.append(f"discovery method: {planet['discovery_method']}")
+    return "; ".join(parts) if parts else json.dumps(planet, sort_keys=True)
+
+
+def _build_summary_prompt(payload: dict[str, Any]) -> str:
+    lines = [SUMMARY_PROMPT, "", "Object data:"]
+
+    if payload.get("main_id"):
+        lines.append(f"- Main ID: {payload['main_id']}")
+    if payload.get("spectral_type"):
+        lines.append(f"- Spectral type: {payload['spectral_type']}")
+    if payload.get("planet_count") is not None:
+        lines.append(f"- Known exoplanets: {payload['planet_count']}")
+
+    planets = payload.get("planets") or []
+    if planets:
+        lines.append("- Planet details:")
+        for planet in planets:
+            lines.append(f"  - {_format_planet(planet)}")
+
+    return "\n".join(lines)
+
+
+def render_summary_markdown(text: str | None) -> Markup:
+    """Render model output as safe HTML for the result page."""
+    summary_text = text or "No summary available."
+    if _markdown_renderer is None:
+        return Markup.escape(summary_text).replace("\n", Markup("<br>\n"))
+    return Markup(_markdown_renderer.render(summary_text))
 
 
 def _init_client() -> Any | None:
@@ -95,7 +163,7 @@ async def generate_summary(payload: dict[str, Any]) -> str:
         # Uses the fast, pre-warmed connection pool from the global client
         response = await client.aio.models.generate_content(
             model="gemini-3.5-flash",  # note: gemini-3.5-flash is the stable production flash model
-            contents=f"Explain the following astronomical object data in plain English: {payload}",
+            contents=_build_summary_prompt(payload),
         )
         return response.text or "No summary available."
     except APIError as e:

@@ -17,6 +17,7 @@ from app.cache import (
     regenerate_ai_summary,
 )
 from app.database import init_db
+from app.narrative import render_summary_markdown
 
 # uvicorn's default logging config only sets up its own "uvicorn"/"uvicorn.error"/
 # "uvicorn.access" loggers -- it does not touch the root logger. Every app.* module
@@ -42,6 +43,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Astronomy Multi-Catalog Cross-Matcher", lifespan=lifespan)
 # Load HTML templates from the templates directory so each route can render pages.
 env = Environment(loader=FileSystemLoader("app/templates"))
+env.filters["render_summary_markdown"] = render_summary_markdown
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -101,7 +103,7 @@ async def object_summary(simbad_main_id: str) -> JSONResponse:
         summary = await ensure_ai_summary(simbad_main_id)
     except LookupError:
         return JSONResponse({"error": "Object not found"}, status_code=404)
-    return JSONResponse({"summary": summary})
+    return JSONResponse({"summary": summary, "summary_html": render_summary_markdown(summary)})
 
 
 @app.post("/object/{simbad_main_id}/summary/regenerate")

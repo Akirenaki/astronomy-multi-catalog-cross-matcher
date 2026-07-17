@@ -21,6 +21,8 @@
     }
     #generate-summary-btn, #regenerate-summary-btn { margin-top: 0.5rem; }
     .ai-summary-status { color: #666; font-size: 0.9em; margin-top: 0.4rem; }
+    .ai-summary-content > :first-child { margin-top: 0; }
+    .ai-summary-content > :last-child { margin-bottom: 0; }
   </style>
 </head>
 <body>
@@ -92,14 +94,14 @@
           <div class="panel" style="margin-top:1rem;" id="ai-summary-panel" data-simbad-id="{{ object.simbad_main_id }}">
             <h2>AI-generated summary</h2>
             {% if object.ai_summary %}
-              <p id="ai-summary-text">{{ object.ai_summary }}</p>
+              <div id="ai-summary-text" class="ai-summary-content">{{ object.ai_summary | render_summary_markdown }}</div>
               <button id="regenerate-summary-btn" type="button">Regenerate</button>
               <p id="regenerate-status" class="ai-summary-status"></p>
             {% else %}
               <button id="generate-summary-btn" type="button">Generate AI summary</button>
-              <p id="ai-summary-text" class="ai-summary-loading" style="display:none;">
+              <div id="ai-summary-text" class="ai-summary-loading ai-summary-content" style="display:none;">
                 Generating summary<span class="dot">.</span><span class="dot">.</span><span class="dot">.</span>
-              </p>
+              </div>
             {% endif %}
           </div>
         {% endif %}
@@ -171,7 +173,7 @@
             })
             .then(function (data) {
               if (!data) return;
-              textEl.textContent = data.summary || 'No summary available.';
+              textEl.innerHTML = data.summary_html || '<p>No summary available.</p>';
               startCooldown(button, statusElement, data.cooldown_seconds || 0);
             })
             .catch(function (err) {
@@ -202,7 +204,7 @@
               return response.json();
             })
             .then(function (data) {
-              textEl.textContent = data.summary || 'No summary available.';
+              textEl.innerHTML = data.summary_html || '<p>No summary available.</p>';
               textEl.classList.remove('ai-summary-loading');
 
               // Build the Regenerate control now that a summary exists, mirroring

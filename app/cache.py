@@ -151,7 +151,6 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
         # there is no structured data yet for the narrative layer to safely describe.
         if generate_ai_summary and resolution_result.state not in ("UNRESOLVED", "AMBIGUOUS", "LOOKUP_FAILED"):
             summary_payload = {
-                "state": resolution_result.state,
                 "main_id": resolution_result.main_id,
                 "spectral_type": resolution_result.spectral_type,
                 "planet_count": len(resolution_result.planets),
