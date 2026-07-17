@@ -19,6 +19,8 @@
       0%, 80%, 100% { opacity: 0; }
       40% { opacity: 1; }
     }
+    #generate-summary-btn, #regenerate-summary-btn { margin-top: 0.5rem; }
+    .ai-summary-status { color: #666; font-size: 0.9em; margin-top: 0.4rem; }
   </style>
 </head>
 <body>
@@ -91,8 +93,11 @@
             <h2>AI-generated summary</h2>
             {% if object.ai_summary %}
               <p id="ai-summary-text">{{ object.ai_summary }}</p>
+              <button id="regenerate-summary-btn" type="button">Regenerate</button>
+              <p id="regenerate-status" class="ai-summary-status"></p>
             {% else %}
-              <p id="ai-summary-text" class="ai-summary-loading">
+              <button id="generate-summary-btn" type="button">Generate AI summary</button>
+              <p id="ai-summary-text" class="ai-summary-loading" style="display:none;">
                 Generating summary<span class="dot">.</span><span class="dot">.</span><span class="dot">.</span>
               </p>
             {% endif %}
@@ -105,34 +110,122 @@
     <p><a href="/">Back to search</a></p>
   </div>
   <script>
-    // Fills in the AI-generated summary after the rest of the page has already
-    // rendered -- the same "results first, AI overview second" pattern search
-    // engines use, so a slow Gemini call never blocks the data the user actually
-    // came here for. Only runs when the server rendered the loading placeholder
-    // (i.e. no summary was cached yet); a page that already has a real summary
-    // server-rendered skips this entirely, so repeat views don't re-spend quota.
     (function () {
       var panel = document.getElementById('ai-summary-panel');
       if (!panel) return;
-      var textEl = document.getElementById('ai-summary-text');
-      if (!textEl || !textEl.classList.contains('ai-summary-loading')) return;
-
       var simbadId = panel.getAttribute('data-simbad-id');
       if (!simbadId) return;
 
-      fetch('/object/' + encodeURIComponent(simbadId) + '/summary')
-        .then(function (response) {
-          if (!response.ok) throw new Error('Request failed: ' + response.status);
-          return response.json();
-        })
-        .then(function (data) {
-          textEl.textContent = data.summary || 'No summary available.';
-          textEl.classList.remove('ai-summary-loading');
-        })
-        .catch(function () {
-          textEl.textContent = 'Could not load the AI summary. Refresh the page to try again.';
-          textEl.classList.remove('ai-summary-loading');
+      var textEl = document.getElementById('ai-summary-text');
+      var generateBtn = document.getElementById('generate-summary-btn');
+      var regenerateBtn = document.getElementById('regenerate-summary-btn');
+      var statusEl = document.getElementById('regenerate-status');
+      var cooldownTimer = null;
+
+      // Purely cosmetic countdown -- the real cooldown is enforced server-side in
+      // regenerate_ai_summary() (app/cache.py). If this timer drifts, gets reset by
+      // a page reload, or is skipped entirely by calling the endpoint directly, the
+      // server still returns 429 with the true remaining time, and that response is
+      // what re-arms this countdown (see wireRegenerateButton below) -- the button's
+      // disabled state always traces back to a server-provided number, never a
+      // client-side guess.
+      function startCooldown(button, statusElement, seconds) {
+        if (cooldownTimer) clearInterval(cooldownTimer);
+        var remaining = Math.max(0, seconds || 0);
+        button.disabled = remaining > 0;
+        function tick() {
+          if (remaining <= 0) {
+            clearInterval(cooldownTimer);
+            button.disabled = false;
+            if (statusElement) statusElement.textContent = '';
+            return;
+          }
+          if (statusElement) {
+            statusElement.textContent = 'You can regenerate again in ' + remaining + 's.';
+          }
+          remaining -= 1;
+        }
+        tick();
+        if (remaining > 0 || seconds > 0) {
+          cooldownTimer = setInterval(tick, 1000);
+        }
+      }
+
+      function wireRegenerateButton(button, statusElement) {
+        button.addEventListener('click', function () {
+          button.disabled = true;
+          if (statusElement) statusElement.textContent = 'Regenerating…';
+          fetch('/object/' + encodeURIComponent(simbadId) + '/summary/regenerate', { method: 'POST' })
+            .then(function (response) {
+              if (response.status === 429) {
+                return response.json().then(function (data) {
+                  var retryAfter = (data && data.retry_after_seconds)
+                    || parseInt(response.headers.get('Retry-After'), 10)
+                    || 0;
+                  startCooldown(button, statusElement, retryAfter);
+                  throw new Error('cooldown-handled');
+                });
+              }
+              if (!response.ok) throw new Error('Request failed: ' + response.status);
+              return response.json();
+            })
+            .then(function (data) {
+              if (!data) return;
+              textEl.textContent = data.summary || 'No summary available.';
+              startCooldown(button, statusElement, data.cooldown_seconds || 0);
+            })
+            .catch(function (err) {
+              if (err && err.message === 'cooldown-handled') return;
+              if (statusElement) statusElement.textContent = 'Could not regenerate the summary. Try again shortly.';
+              button.disabled = false;
+            });
         });
+      }
+
+      if (regenerateBtn) {
+        wireRegenerateButton(regenerateBtn, statusEl);
+      }
+
+      // Click-to-generate (Decision A): the initial summary is no longer fetched
+      // automatically on page load. This only runs for objects with no ai_summary
+      // yet -- the generateBtn element doesn't exist in the server-rendered markup
+      // once a summary is already present.
+      if (generateBtn) {
+        generateBtn.addEventListener('click', function () {
+          generateBtn.style.display = 'none';
+          textEl.style.display = '';
+          textEl.classList.add('ai-summary-loading');
+
+          fetch('/object/' + encodeURIComponent(simbadId) + '/summary')
+            .then(function (response) {
+              if (!response.ok) throw new Error('Request failed: ' + response.status);
+              return response.json();
+            })
+            .then(function (data) {
+              textEl.textContent = data.summary || 'No summary available.';
+              textEl.classList.remove('ai-summary-loading');
+
+              // Build the Regenerate control now that a summary exists, mirroring
+              // the markup result.html renders server-side when object.ai_summary
+              // was already set.
+              var newRegenerateBtn = document.createElement('button');
+              newRegenerateBtn.type = 'button';
+              newRegenerateBtn.id = 'regenerate-summary-btn';
+              newRegenerateBtn.textContent = 'Regenerate';
+              var newStatusEl = document.createElement('p');
+              newStatusEl.id = 'regenerate-status';
+              newStatusEl.className = 'ai-summary-status';
+              panel.appendChild(newRegenerateBtn);
+              panel.appendChild(newStatusEl);
+              wireRegenerateButton(newRegenerateBtn, newStatusEl);
+            })
+            .catch(function () {
+              textEl.textContent = 'Could not load the AI summary. Try again.';
+              textEl.classList.remove('ai-summary-loading');
+              generateBtn.style.display = '';
+            });
+        });
+      }
     })();
   </script>
 </body>

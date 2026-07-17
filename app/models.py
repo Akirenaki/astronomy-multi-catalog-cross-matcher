@@ -27,6 +27,11 @@ class ObjectRecord(Base):
     spectral_type: Mapped[str | None] = mapped_column(String, nullable=True)
     resolution_state: Mapped[str] = mapped_column(String, nullable=False)
     ai_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Set whenever an AI summary is actually generated (initial generation or a
+    # regeneration) -- kept separate from resolved_at since regeneration can happen
+    # long after the object was first resolved. Drives the per-object cooldown in
+    # regenerate_ai_summary(); left null until the first summary is generated.
+    ai_summary_generated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # Only populated when resolution_state == 'AMBIGUOUS'. This preserves the candidate list for UI rendering.
     candidates_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Serialized (JSON) alias-chain trail, e.g. ["51 pegasi", "51 Peg", "51 Peg b"], for the
@@ -78,6 +83,9 @@ class ObjectRecord(Base):
             "spectral_type": self.spectral_type,
             "resolution_state": self.resolution_state,
             "ai_summary": self.ai_summary,
+            "ai_summary_generated_at": (
+                self.ai_summary_generated_at.isoformat() if self.ai_summary_generated_at else None
+            ),
             "candidates": self.candidates,
             "resolved_via": self.resolved_via,
             "resolved_at": self.resolved_at.isoformat() if self.resolved_at else None,

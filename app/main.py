@@ -7,7 +7,15 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from jinja2 import Environment, FileSystemLoader
 
-from app.cache import ensure_ai_summary, get_object_by_simbad_id, get_or_resolve, list_recent_objects
+from app.cache import (
+    AI_SUMMARY_COOLDOWN,
+    CooldownActiveError,
+    ensure_ai_summary,
+    get_object_by_simbad_id,
+    get_or_resolve,
+    list_recent_objects,
+    regenerate_ai_summary,
+)
 from app.database import init_db
 
 # uvicorn's default logging config only sets up its own "uvicorn"/"uvicorn.error"/
@@ -94,6 +102,32 @@ async def object_summary(simbad_main_id: str) -> JSONResponse:
     except LookupError:
         return JSONResponse({"error": "Object not found"}, status_code=404)
     return JSONResponse({"summary": summary})
+
+
+@app.post("/object/{simbad_main_id}/summary/regenerate")
+async def object_summary_regenerate(simbad_main_id: str) -> JSONResponse:
+    """Force-regenerate the AI narrative for an object, subject to a per-object
+    cooldown. See regenerate_ai_summary()'s docstring (app/cache.py) for exactly
+    what this cooldown does and doesn't protect against -- it's a UX guard against
+    double-clicking, not abuse protection, since the underlying cache is global.
+
+    The Retry-After header and JSON body's retry_after_seconds are the
+    server-side source of truth the client-side countdown in result.html is built
+    from; disabling the button client-side alone would be trivially bypassed by
+    calling this endpoint directly, so the 429 here is the actual enforcement.
+    """
+    try:
+        summary = await regenerate_ai_summary(simbad_main_id)
+    except LookupError:
+        return JSONResponse({"error": "Object not found"}, status_code=404)
+    except CooldownActiveError as exc:
+        response = JSONResponse(
+            {"error": "Cooldown active", "retry_after_seconds": exc.retry_after_seconds},
+            status_code=429,
+        )
+        response.headers["Retry-After"] = str(exc.retry_after_seconds)
+        return response
+    return JSONResponse({"summary": summary, "cooldown_seconds": int(AI_SUMMARY_COOLDOWN.total_seconds())})
 
 
 @app.get("/api/resolve")

@@ -18,6 +18,23 @@ from app.catalogs.simbad import normalize_query
 
 logger = logging.getLogger(__name__)
 
+# Per-object cooldown for POST /object/{id}/summary/regenerate. This is a UX guard
+# against accidental double-clicking on the same page -- it is NOT meaningful abuse
+# protection, since this app's cache is global (not per-user): someone could still
+# drain Gemini quota by clicking "Generate" across many *different* objects. Real
+# throttling (per-IP/session/user) would be a separate, larger feature.
+AI_SUMMARY_COOLDOWN = timedelta(minutes=5)
+
+
+class CooldownActiveError(Exception):
+    """Raised by regenerate_ai_summary() when called again before AI_SUMMARY_COOLDOWN
+    has elapsed since the object's last generation. Callers must handle this
+    explicitly rather than treating a no-op and a fresh regeneration the same way."""
+
+    def __init__(self, retry_after_seconds: int) -> None:
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(f"Cooldown active; retry after {retry_after_seconds}s")
+
 
 async def get_cached(query_text: str) -> ObjectRecord | None:
     """Return a cached object record when the normalized query is still fresh."""
@@ -245,6 +262,68 @@ async def ensure_ai_summary(simbad_main_id: str) -> str:
         summary = await generate_summary(summary_payload)
 
         record.ai_summary = summary
+        # Only set on an actual generation, not on the cache-hit early return above --
+        # this timestamp is what regenerate_ai_summary()'s cooldown is measured from.
+        record.ai_summary_generated_at = datetime.now(timezone.utc)
+        await session.commit()
+        return summary
+
+
+async def regenerate_ai_summary(simbad_main_id: str) -> str:
+    """Force-regenerate the AI narrative for an already-resolved object, subject to
+    AI_SUMMARY_COOLDOWN.
+
+    Unlike ensure_ai_summary(), this does NOT short-circuit on an existing
+    ai_summary -- it always regenerates and overwrites it (only the latest summary
+    is ever kept; no new row/table), unless the cooldown is still active, in which
+    case it raises CooldownActiveError rather than silently no-op-ing or silently
+    regenerating anyway, so the caller can tell the two outcomes apart.
+
+    Raises LookupError if no object exists for this SIMBAD main ID.
+    Raises CooldownActiveError if called again within AI_SUMMARY_COOLDOWN of the
+    object's last generation.
+    """
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(ObjectRecord)
+            .options(selectinload(ObjectRecord.planets))
+            .where(ObjectRecord.simbad_main_id == simbad_main_id)
+        )
+        record = result.scalar_one_or_none()
+        if record is None:
+            raise LookupError(f"No object found for simbad_main_id={simbad_main_id!r}")
+
+        if record.resolution_state not in ("RESOLVED", "PARTIAL"):
+            # Mirrors ensure_ai_summary()'s own skip rule: AMBIGUOUS/UNRESOLVED/
+            # LOOKUP_FAILED have no confirmed structured data to summarize, so
+            # there's nothing meaningful to regenerate.
+            return "No summary available."
+
+        if record.ai_summary_generated_at is not None:
+            generated_at = record.ai_summary_generated_at
+            # SQLite's DateTime column round-trips aware datetimes as naive ones,
+            # so a value written with datetime.now(timezone.utc) can come back
+            # tzinfo=None. Re-attach UTC before subtracting from an aware "now" --
+            # otherwise this comparison raises TypeError (or worse, silently
+            # compares wall-clock time across a real timezone mismatch).
+            if generated_at.tzinfo is None:
+                generated_at = generated_at.replace(tzinfo=timezone.utc)
+            elapsed = datetime.now(timezone.utc) - generated_at
+            if elapsed < AI_SUMMARY_COOLDOWN:
+                retry_after = AI_SUMMARY_COOLDOWN - elapsed
+                raise CooldownActiveError(retry_after_seconds=max(1, int(retry_after.total_seconds())))
+
+        summary_payload = {
+            "state": record.resolution_state,
+            "main_id": record.simbad_main_id,
+            "spectral_type": record.spectral_type,
+            "planet_count": len(record.planets),
+            "planets": [planet.to_dict() for planet in record.planets],
+        }
+        summary = await generate_summary(summary_payload)
+
+        record.ai_summary = summary
+        record.ai_summary_generated_at = datetime.now(timezone.utc)
         await session.commit()
         return summary
 
