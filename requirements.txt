@@ -4,6 +4,7 @@ httpx==0.28.1
 httpx2==2.7.0
 sqlalchemy
 aiosqlite
+asyncpg
 jinja2
 google-genai
 python-dotenv
