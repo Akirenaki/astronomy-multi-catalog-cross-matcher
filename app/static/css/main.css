@@ -95,7 +95,9 @@ body {
   font-size: 15px;
   line-height: 1.55;
   color: var(--color-text);
-  background: var(--color-canvas);
+  /* The space background sits fixed behind everything (see .space-bg);
+     body itself stays transparent so it shows through. */
+  background: transparent;
 }
 
 a { color: var(--color-link); text-decoration: none; }
@@ -194,10 +196,12 @@ hr { border: none; border-top: 1px solid var(--color-border-muted); margin: var(
   max-width: 1040px;
   margin: 0 auto;
   padding: 0 var(--space-5) var(--space-6);
-  color: var(--color-text-tertiary);
+  /* Sits directly on the dark space-bg scrim now rather than a flat light
+     canvas, so this needs to be light rather than var(--color-text-tertiary). */
+  color: rgba(255, 255, 255, 0.7);
   font-size: 0.8125rem;
 }
-.site-footer a { color: var(--color-text-tertiary); }
+.site-footer a { color: rgba(255, 255, 255, 0.85); }
 
 /* ---------------------------------------------------------------------- */
 /* Cards / panels                                                          */
@@ -598,6 +602,85 @@ hr { border: none; border-top: 1px solid var(--color-border-muted); margin: var(
 .ai-panel #generate-summary-btn,
 .ai-panel #regenerate-summary-btn { margin-top: var(--space-3); }
 .ai-summary-status { color: var(--color-text-tertiary); font-size: 0.8125rem; margin-top: var(--space-2); }
+
+/* ---------------------------------------------------------------------- */
+/* Space background                                                        */
+/* ---------------------------------------------------------------------- */
+
+/*
+ * Fixed, full-viewport layer sitting behind the whole page (z-index -1,
+ * body is transparent above it - see body rule). It starts out as a cheap,
+ * instant CSS gradient "starfield" so there is never a blank flash and
+ * never anything to wait on. app/static/js/space-bg.js may - asynchronously,
+ * well after the page has already rendered - fetch a real photo from NASA's
+ * Image and Video Library and fade it in on top via `.is-loaded`. If that
+ * never happens (offline, slow connection, JS disabled, Data Saver on),
+ * this gradient is the entire background and the page still looks
+ * intentional.
+ */
+.space-bg {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background:
+    radial-gradient(1px 1px at 12% 22%, rgba(255,255,255,0.9), transparent 100%),
+    radial-gradient(1px 1px at 78% 61%, rgba(255,255,255,0.7), transparent 100%),
+    radial-gradient(1.5px 1.5px at 34% 82%, rgba(255,255,255,0.8), transparent 100%),
+    radial-gradient(1px 1px at 58% 12%, rgba(255,255,255,0.6), transparent 100%),
+    radial-gradient(1px 1px at 89% 33%, rgba(255,255,255,0.7), transparent 100%),
+    radial-gradient(1.5px 1.5px at 20% 48%, rgba(255,255,255,0.6), transparent 100%),
+    linear-gradient(160deg, #0b1220 0%, #101a30 45%, #0c1424 100%);
+  background-repeat: no-repeat;
+  background-size: cover;
+  background-position: center;
+}
+
+/* A real photo (once loaded) fades in on top of the gradient via a second,
+   pseudo-element layer, so the crossfade is smooth rather than a swap. */
+.space-bg::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: inherit;
+  opacity: 0;
+  transition: opacity 900ms ease;
+}
+
+.space-bg.is-loaded::before {
+  /* At the point .is-loaded is added, background-image on .space-bg itself
+     has already been overwritten (by JS) to the real photo URL, and
+     `inherit` above picks that up for the fade-in layer. */
+  opacity: 1;
+}
+
+/* Readability scrim: random photos vary wildly in brightness, so a
+   constant dark overlay guarantees header/footer text and page gutters
+   stay legible no matter which image is showing. Cards/panels already
+   have their own opaque surfaces and are unaffected. */
+.space-bg::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(4,8,16,0.55), rgba(4,8,16,0.7));
+}
+
+.space-bg__credit {
+  position: fixed;
+  right: var(--space-3);
+  bottom: var(--space-3);
+  z-index: 1;
+  margin: 0;
+  padding: var(--space-1) var(--space-2);
+  font-size: 0.75rem;
+  color: rgba(255,255,255,0.85);
+  background: rgba(4,8,16,0.45);
+  border-radius: var(--radius-sm);
+  backdrop-filter: blur(2px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .space-bg::before { transition: none; }
+}
 
 /* ---------------------------------------------------------------------- */
 /* Misc utility                                                            */

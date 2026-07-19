@@ -8,6 +8,9 @@
   {% block extra_head %}{% endblock %}
 </head>
 <body>
+  <div id="space-bg" class="space-bg" aria-hidden="true"></div>
+  <p id="space-bg-credit" class="space-bg__credit" hidden></p>
+
   <header class="site-header">
     <div class="site-header__inner">
       <a href="/" class="wordmark">
@@ -41,6 +44,7 @@
     <a href="https://exoplanetarchive.ipac.caltech.edu/" target="_blank" rel="noopener">NASA Exoplanet Archive</a>
     &middot; <a href="https://github.com/Akirenaki/astronomy-multi-catalog-cross-matcher" target="_blank" rel="noopener">source on GitHub</a>
   </footer>
+  <script src="/static/js/space-bg.js" defer></script>
   {% block extra_body %}{% endblock %}
 </body>
 </html>

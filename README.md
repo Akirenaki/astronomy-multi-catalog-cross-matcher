@@ -8,6 +8,7 @@
 4. [Real World Examples](#iv-real-world-examples)
 5. [Database Schema](#v-database-schema)
 6. [FAQ](#vi-faq)
+7. [Third-Party Data & Services](#vii-third-party-data--services)
 
 ## **I. App Description**
 
@@ -414,3 +415,14 @@ This app currently uses session-cookie auth with form POSTs, but it does not yet
 Use `GET /api/resolve?q=...`. It returns the same resolution data as the HTML flow, but as JSON for scripts or other tools.
 
 </details>
+
+## **VII. Third-Party Data & Services**
+
+This project depends on a few external data sources and APIs. The app uses them for lookup and display, but each service keeps its own terms, citation guidance, and usage rules.
+
+- **NASA image backgrounds.** The animated space background pulls from NASA's public Image and Video Library. The app shows an on-page credit when a NASA image is loaded, and any reuse outside this project should follow NASA's current media usage guidance.
+- **SIMBAD.** SIMBAD is the source of the primary object resolution step. If you reuse this project or publish derived results, include SIMBAD attribution or citation as required by their current data-use guidance.
+- **NASA Exoplanet Archive.** Exoplanet data comes from the NASA Exoplanet Archive. If you reuse catalog output or publish derived results, follow NASA's citation guidance for the archive.
+- **Gemini API.** AI summaries are generated through Google's Gemini API. Any use of that feature is subject to Google's current API terms and related policies.
+
+If you want the README to be stricter, you can add exact citation text or links for each service once you've confirmed the current wording from their documentation.
