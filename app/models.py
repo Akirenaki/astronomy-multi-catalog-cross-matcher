@@ -1,7 +1,7 @@
 """SQLAlchemy ORM models for cached astronomical object resolutions."""
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, List
 
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, String, Text, UniqueConstraint
@@ -31,14 +31,14 @@ class ObjectRecord(Base):
     # regeneration) -- kept separate from resolved_at since regeneration can happen
     # long after the object was first resolved. Drives the per-object cooldown in
     # regenerate_ai_summary(); left null until the first summary is generated.
-    ai_summary_generated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ai_summary_generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Only populated when resolution_state == 'AMBIGUOUS'. This preserves the candidate list for UI rendering.
     candidates_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Serialized (JSON) alias-chain trail, e.g. ["51 pegasi", "51 Peg", "51 Peg b"], for the
     # "resolved via: ... -> ... -> ..." UI the spec calls for on RESOLVED/PARTIAL pages.
     resolved_via_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    resolved_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    resolved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     # Child rows associated with this object, automatically removed when the parent row is deleted.
     identifiers: Mapped[List["IdentifierRecord"]] = relationship(back_populates="object", cascade="all, delete-orphan")
@@ -154,7 +154,7 @@ class User(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     saved_searches: Mapped[List["SavedSearch"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
@@ -171,7 +171,7 @@ class SavedSearch(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     object_id: Mapped[int] = mapped_column(ForeignKey("objects.id", ondelete="CASCADE"), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     user: Mapped[User] = relationship(back_populates="saved_searches")
     object: Mapped[ObjectRecord] = relationship()
@@ -187,7 +187,7 @@ class UserSummarySnapshot(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     object_id: Mapped[int] = mapped_column(ForeignKey("objects.id", ondelete="CASCADE"), nullable=False)
     summary_text: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     user: Mapped[User] = relationship(back_populates="summary_snapshots")
     object: Mapped[ObjectRecord] = relationship()
@@ -202,7 +202,7 @@ class RateLimitEvent(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     subject_type: Mapped[str] = mapped_column(String, nullable=False)
     subject_id: Mapped[str] = mapped_column(String, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
         CheckConstraint("subject_type IN ('user','session')", name="ck_rate_limit_subject_type"),
