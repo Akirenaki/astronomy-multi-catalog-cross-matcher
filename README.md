@@ -4,28 +4,46 @@
 
 1. [App Description](#i-app-description)
 2. [App & User Workflow](#ii-app--user-workflow)
-3. [Real World Examples](#iii-real-world-examples)
-4. [Database Schema](#iv-database-schema)
-5. [FAQ](#v-faq)
+3. [Accounts, Favorites & Personal AI Summaries](#iii-accounts-favorites--personal-ai-summaries)
+4. [Real World Examples](#iv-real-world-examples)
+5. [Database Schema](#v-database-schema)
+6. [FAQ](#vi-faq)
 
 ## **I. App Description**
 
-An FastAPI WebApp that takes an unstructured, informally-typed star name, resolves it deterministically across independent astronomical catalogs via a cross-identification pipeline, and then—as a distinct, separate step—translates the resulting structured data into a plain-language explanation a non-specialist can actually read.
+An FastAPI WebApp that takes an unstructured, informally-typed star name, resolves it deterministically across independent astronomical catalogs via a cross-identification pipeline, and then, as a distinct, separate step, translates the resulting structured data into a plain-language explanation a non-specialist can actually read.
 
-**Architectural principle:** the resolution engine (deterministic, SQL/ADQL-driven) and the narrative layer (AI-generated) are kept strictly separate — the AI layer can never affect matching logic or introduce a factual error the SQL layer didn't already contain.
+**Architectural principle:** the resolution engine (deterministic, SQL/ADQL-driven) and the narrative layer (AI-generated) are kept strictly separate: the AI layer can never affect matching logic or introduce a factual error the SQL layer didn't already contain.
+
+The resolver, cross-matcher, and AI narrative are fully usable anonymously. An optional account layer sits on top for anyone who wants to save objects and keep a personal copy of the AI narratives they generate. See [Section III](#iii-accounts-favorites--personal-ai-summaries).
 
 ## **II. App & User Workflow**
 
-User types in an informal, human-typed star name ("51 Peg", "HD 217014", even slightly messy input), and it:
+User types in an informal star name ("51 Peg", "HD 217014", even slightly messy input), and it:
 
 1. **Normalises** the query (fixes whitespace/casing, canonicalizes catalog prefixes like HD/HIP/GJ/TYC without stripping them)
 2. **[Resolves](#a-resolve-explanation)** identity against SIMBAD (the standard astronomical object database) via a TAP/ADQL query, pulling the canonical name, coordinates, spectral type, and every known alias in one round trip
 3. **Cross-matches** those aliases against the NASA Exoplanet Archive in a single batched query (not one HTTP request per alias) to find any known planets orbiting that star
 4. **Classifies** the result into one of [five explicit states](#b-five-states-explanation) — `RESOLVED`, `PARTIAL`, `AMBIGUOUS`, `UNRESOLVED`, `LOOKUP_FAILED` — rather than quietly picking one answer or silently failing.
 5. **Caches** the result with a 14-day TTL (1 hour for failed/ambiguous lookups, so bugs self-heal quickly)
-6. **Generates** a plain-English AI narrative (via Gemini API) explaining the result for a non-specialist, kept strictly separate from and never able to corrupt the underlying scientific data
+6. **Renders** the result page immediately with the scientific data. The plain-English AI narrative (via the Gemini API) is generated separately on request, via a "Generate AI summary" button. Therefore, a slow Gemini call never blocks the page it's summarizing. Once generated, the narrative is cached the same way the scientific data is, and stays kept strictly separate from it: the AI layer can never corrupt or override what the SQL layer already established.
 
-## **III. Real-world examples**
+Programmatic access is also available via `GET /api/resolve?q=...`, which returns the same resolution data as JSON instead of HTML.
+
+## **III. Accounts, Favorites & Personal AI Summaries**
+
+Accounts are entirely optional; every step above works the same for an anonymous visitor. Logging in (session-cookie based, via email + password) adds three things on top:
+
+- **Saving objects.** A logged-in user can favorite/unfavorite any resolved or partial object from its result page. Their saved list lives at `/account/saved`.
+- **Login redirects for save actions.** If an anonymous visitor tries to favorite or unfavorite an object, the app sends them to `/login` first and returns them to the object page afterward.
+- **A personal copy of "your" AI summary.** Logged-in users get a saved snapshot of the shared summary. See FAQ C for details.
+- **Fair-use protection on AI generation**, enforced in two independent layers:
+  1. **Per-object cooldown (5 minutes).** Stops rapid double-clicking Regenerate on the *same* object. Applies regardless of login state.
+  2. **Per-client rate limit (20 requests/hour).** Stops one client — a logged-in user, or an anonymous browser identified by its session cookie — from spending Gemini quota by clicking Generate across *many different* objects in a short window, which the per-object cooldown alone doesn't prevent.
+
+See the FAQ for why `/history` stays global, why anonymous save actions redirect to login, and why CSRF protection is still a known limitation.
+
+## **IV. Real-world examples**
 
 | Search | Expected state | Why |
 | --- | --- | --- |
@@ -39,9 +57,9 @@ User types in an informal, human-typed star name ("51 Peg", "HD 217014", even sl
 | `"asdfjkl"` | UNRESOLVED | Gibberish |
 | `"HD 217014"` (SIMBAD unreachable — network timeout, firewalled host, etc.) | LOOKUP_FAILED | SIMBAD was never actually reached, so this is not a real "no match" |
 
-## **IV. Database Schema**
+## **V. Database Schema**
 
-The application utilizes a relational structure (SQLAlchemy) to cache SIMBAD resolutions, cross-matched planet data, and AI-generated narratives.
+The application utilizes a relational structure (SQLAlchemy) to cache SIMBAD resolutions, cross-matched planet data, and AI-generated narratives, plus (optionally) accounts, favorites, personal summary snapshots, and rate-limit bookkeeping.
 
 <details>
 <summary><b>View Database Table Definitions (Click to expand)</b></summary>
@@ -61,6 +79,7 @@ This is the core table of the application. It caches the primary astronomical da
 | **spectral_type** | VARCHAR | Yes | |
 | **resolution_state** | VARCHAR | No | CHECK (`RESOLVED`, `AMBIGUOUS`, `PARTIAL`, `UNRESOLVED`, `LOOKUP_FAILED`) |
 | **ai_summary** | TEXT | Yes | |
+| **ai_summary_generated_at** | DATETIME | Yes | Set on real (re)generation only, never on a cache hit |
 | **candidates_json** | TEXT | Yes | |
 | **resolved_via_json** | TEXT | Yes | |
 | **resolved_at** | DATETIME | No | |
@@ -77,6 +96,7 @@ This is the core table of the application. It caches the primary astronomical da
 - **`spectral_type`**: The spectral classification of the star (e.g., `G5V`), indicating its temperature, luminosity, and evolutionary stage.
 - **`resolution_state`**: The core state engine value of the application. Restricted by a `CHECK` constraint to exactly five mutually exclusive states: `RESOLVED`, `AMBIGUOUS`, `PARTIAL`, `UNRESOLVED`, or `LOOKUP_FAILED`.
 - **`ai_summary`**: The plain-language narrative generated by the Gemini API. Stored here safely as a string text layer so it cannot touch or corrupt the scientific coordinate float data.
+- **`ai_summary_generated_at`**: Timestamp of the last real generation (initial Generate or a Regenerate) — never updated on a cache hit. Drives the 5-minute per-object cooldown on regeneration; null until a summary has been generated at least once.
 - **`candidates_json`**: A stringified JSON array utilized when a state is `AMBIGUOUS`. It stores the basic data of multiple potential stellar matches so the UI can render a disambiguation selection list.
 - **`resolved_via_json`**: A stringified JSON audit trail recording exactly how the app navigated from the raw query to the final match (e.g., `User Input -> SIMBAD Alias -> NASA Exoplanet ID`).
 - **`resolved_at`**: The precise timestamp of when the external API lookup was performed and recorded.
@@ -134,9 +154,94 @@ Stores structural data for confirmed exoplanets tied to host stars, sourced from
 - **`discovery_year`**: The calendar year the exoplanet's discovery was officially confirmed and published (e.g., `1995`).
 - **`discovery_method`**: The scientific technique utilized by astronomers to detect the planet (e.g., `Radial Velocity`, `Transit`).
 
+---
+
+### 4. The `users` Table
+
+Registered accounts. Session-cookie based auth (Starlette `SessionMiddleware`) — no separate session-token table.
+
+| Column Name | Data Type | Nullable? | Constraints / Notes |
+| :--- | :--- | :--- | :--- |
+| **id** | INTEGER | No | PRIMARY KEY |
+| **email** | VARCHAR | No | UNIQUE |
+| **password_hash** | VARCHAR | No | bcrypt |
+| **created_at** | DATETIME | No | |
+
+#### Detailed Column Explanations for `users`
+
+- **`id`**: Internal unique identifier for the account.
+- **`email`**: Login identifier. `UNIQUE` constraint enforced at the database level — registration attempts an insert and catches the resulting integrity error rather than pre-checking existence with a separate query, avoiding a check-then-act race between two concurrent registrations for the same email.
+- **`password_hash`**: Bcrypt hash of the password. The plaintext password is never stored or logged.
+- **`created_at`**: Account creation timestamp.
+
+---
+
+### 5. The `saved_searches` Table
+
+A logged-in user's favorited objects. Minimal MVP shape — just the link and a timestamp, no note/label field yet.
+
+| Column Name | Data Type | Nullable? | Constraints / Notes |
+| :--- | :--- | :--- | :--- |
+| **id** | INTEGER | No | PRIMARY KEY |
+| **user_id** | INTEGER | No | FOREIGN KEY (`users.id`) ON DELETE CASCADE |
+| **object_id** | INTEGER | No | FOREIGN KEY (`objects.id`) ON DELETE CASCADE |
+| **created_at** | DATETIME | No | |
+
+#### Detailed Column Explanations for `saved_searches`
+
+- **`id`**: Internal unique identifier for the favorite record.
+- **`user_id`**: The user who favorited the object. `ON DELETE CASCADE` — deleting a user removes their favorites.
+- **`object_id`**: The favorited object. `ON DELETE CASCADE` — deleting a cached object removes any favorites pointing at it.
+- **`created_at`**: When the object was favorited; drives the ordering on `/account/saved` (most recent first).
+
+*Note: Enforces a composite `UNIQUE (user_id, object_id)` constraint — a user can favorite a given object at most once. Re-favoriting an already-favorited object is treated as a no-op, not an error.*
+
+---
+
+### 6. The `user_summary_snapshots` Table
+
+A logged-in user's personal copy of the AI summary they most recently generated/regenerated for a given object — the mechanism behind the ownership guarantee described in [Section III](#iii-accounts-favorites--personal-ai-summaries).
+
+| Column Name | Data Type | Nullable? | Constraints / Notes |
+| :--- | :--- | :--- | :--- |
+| **id** | INTEGER | No | PRIMARY KEY |
+| **user_id** | INTEGER | No | FOREIGN KEY (`users.id`) ON DELETE CASCADE |
+| **object_id** | INTEGER | No | FOREIGN KEY (`objects.id`) ON DELETE CASCADE |
+| **summary_text** | TEXT | No | |
+| **created_at** | DATETIME | No | |
+
+#### Detailed Column Explanations for `user_summary_snapshots`
+
+- **`id`**: Internal unique identifier for the snapshot record.
+- **`user_id`** / **`object_id`**: Which user, and which object, this snapshot belongs to. Both `ON DELETE CASCADE`.
+- **`summary_text`**: The AI narrative text as it existed at the moment this user generated/regenerated it. Entirely separate storage from `objects.ai_summary` — this table is never the source of the shared canonical summary, only a personal copy of it.
+- **`created_at`**: When this user's snapshot was captured/last updated.
+
+*Note: Enforces a composite `UNIQUE (user_id, object_id)` constraint — each user has at most one snapshot per object, their most recent own generation. A user regenerating overwrites their own snapshot; another user's regenerate never touches it.*
+
+---
+
+### 7. The `rate_limit_events` Table
+
+An event log of Gemini-quota-spending actions (Generate/Regenerate clicks), used to enforce the per-client rate limit described in [Section III](#iii-accounts-favorites--personal-ai-summaries). Deliberately a log table rather than a counter column, so a sliding window can be computed by counting rows rather than resetting a counter on a timer.
+
+| Column Name | Data Type | Nullable? | Constraints / Notes |
+| :--- | :--- | :--- | :--- |
+| **id** | INTEGER | No | PRIMARY KEY |
+| **subject_type** | VARCHAR | No | CHECK (`user`, `session`) |
+| **subject_id** | VARCHAR | No | |
+| **created_at** | DATETIME | No | |
+
+#### Detailed Column Explanations for `rate_limit_events`
+
+- **`id`**: Internal unique identifier for the log entry.
+- **`subject_type`**: `user` for a logged-in request (limited per `users.id`) or `session` for an anonymous request (limited per the Starlette session-cookie id, assigned to every visitor regardless of login state).
+- **`subject_id`**: The `users.id` or session id this event counts against, as a string — not a foreign key to `users.id`, since one column needs to hold both kinds of identifier uniformly, and log rows should survive a user account being deleted rather than needing `ON DELETE` handling on what's really just an audit trail.
+- **`created_at`**: When the request was made — the sliding window (20 requests/hour) is computed by counting rows newer than `now - 1 hour` for the same `(subject_type, subject_id)` pair.
+
 </details>
 
-## **V. FAQ**
+## **VI. FAQ**
 
 ### **A. Resolve Explanation**
 
@@ -246,3 +351,66 @@ Was SIMBAD actually reachable, and did it return a usable response?
 ```
 
 **Each state is mutually exclusive and exhaustive** — every possible search outcome falls into exactly one bucket.
+
+### **C. "My saved summary looks different from what's shown to everyone else now — is that a bug?"**
+
+<details>
+<summary><b>View explanation (Click to expand)</b></summary>
+
+No — this is expected, and it's the point of `user_summary_snapshots`.
+
+There is exactly one canonical AI summary per object (`objects.ai_summary`), shown to every anonymous visitor and to any logged-in user who hasn't generated their own. If you're logged in and you personally clicked Generate or Regenerate, `/account/saved` shows *your* copy from that moment, even if someone else regenerates the shared version afterward.
+
+This is an ownership/no-clobber guarantee, not the AI narrative varying its actual content by user. If you and another user both generate at the same point in time, from the same underlying data, you'll get the same text.
+
+</details>
+
+### **D. "Why two separate limits (a 5-minute cooldown AND a 20/hour rate limit) instead of just one?"**
+
+<details>
+<summary><b>View explanation (Click to expand)</b></summary>
+
+They stop different failure modes:
+
+- The **cooldown** is per-*object* — it stops rapid double-clicking Regenerate on the same star. It does nothing to stop someone clicking Generate on twenty different stars in a row.
+- The **rate limit** is per-*client* (logged-in user, or anonymous session) — it stops exactly that: one visitor spending Gemini quota across many different objects in a short window, which the cooldown alone can't see, since it only ever looks at one object at a time.
+
+Both checks run on every Generate/Regenerate request; either can reject it independently.
+
+</details>
+
+### **E. "Why is /history global instead of per-user?"**
+
+<details>
+<summary><b>View explanation (Click to expand)</b></summary>
+
+`/history` is a site-wide feed of recently resolved objects, not a personal activity log. The app already has a private per-user list at `/account/saved`, so keeping `/history` global makes it a shared discovery page instead of duplicating the same concept twice.
+
+</details>
+
+### **F. "Why do anonymous favorite/unfavorite actions send me to login?"**
+
+<details>
+<summary><b>View explanation (Click to expand)</b></summary>
+
+Favorites are tied to a user account. If you are not logged in, the app redirects you to `/login` and then brings you back to the object page after authentication so the action can be completed on the right account.
+
+</details>
+
+### **G. "Why isn't CSRF protection implemented yet?"**
+
+<details>
+<summary><b>View explanation (Click to expand)</b></summary>
+
+This app currently uses session-cookie auth with form POSTs, but it does not yet include CSRF tokens. That is acceptable for local or portfolio use, but it should be added before any public deployment.
+
+</details>
+
+### **H. "How do I query the resolver programmatically?"**
+
+<details>
+<summary><b>View explanation (Click to expand)</b></summary>
+
+Use `GET /api/resolve?q=...`. It returns the same resolution data as the HTML flow, but as JSON for scripts or other tools.
+
+</details>

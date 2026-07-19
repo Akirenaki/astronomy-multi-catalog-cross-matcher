@@ -40,13 +40,7 @@ from app.models import User
 from app.narrative import render_summary_markdown
 from app.ratelimit import RateLimitExceededError, check_and_record
 
-# uvicorn's default logging config only sets up its own "uvicorn"/"uvicorn.error"/
-# "uvicorn.access" loggers -- it does not touch the root logger. Every app.* module
-# (resolver, cache, catalogs.simbad, catalogs.exoplanet_archive) creates its logger via
-# plain logging.getLogger(__name__) and relies on propagation to root, so without this,
-# every logger.info()/logger.warning() call in this app -- including the per-stage
-# timing diagnostics used to debug slow searches -- is silently discarded rather than
-# printed anywhere, even when running with `uvicorn app.main:app --reload`.
+# Configure root logging so app.* loggers propagate under uvicorn.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -64,18 +58,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Astronomy Multi-Catalog Cross-Matcher", lifespan=lifespan)
 
-# Decision F: session-cookie auth via Starlette's SessionMiddleware. Also the shared
-# infra Decision D's anonymous rate limiting rides on (see app.auth.get_session_id) --
-# every visitor gets a signed session cookie once this is installed, whether or not
-# they ever log in.
-#
-# SESSION_SECRET_KEY should be set explicitly in any real deployment: without it,
-# this falls back to a freshly generated key on every process start, which means (a)
-# all sessions -- including logins -- are invalidated on every restart, and (b)
-# running multiple worker processes would give each one a different key, breaking
-# sessions for requests that land on a different worker than the one that issued the
-# cookie. That's an acceptable trade for solo local development, not for anything
-# public-facing.
+# Session cookies back both login state and anonymous rate limiting.
+# Set SESSION_SECRET_KEY in real deployments so cookies survive restarts and work
+# consistently across multiple workers.
 _session_secret_key = os.getenv("SESSION_SECRET_KEY")
 if not _session_secret_key:
     _session_secret_key = secrets.token_hex(32)
@@ -128,12 +113,7 @@ async def search(
 async def object_profile(
     request: Request, simbad_main_id: str, current_user: User | None = Depends(get_current_user)
 ) -> HTMLResponse:
-    """Display a previously stored object profile using its SIMBAD identifier.
-
-    Honors the same TTL as /search: if the cached row for this id has expired (or
-    was never cached under this exact id), re-resolve using the id itself, which is
-    always a valid SIMBAD identifier, rather than silently serving stale/blank data.
-    """
+    """Display a stored object profile, refreshing it if the cache entry expired."""
     obj = await get_object_by_simbad_id(simbad_main_id)
     if obj is None:
         obj = await get_or_resolve(simbad_main_id, generate_ai_summary=False)
@@ -149,21 +129,7 @@ async def object_profile(
 async def object_summary(
     request: Request, simbad_main_id: str, current_user: User | None = Depends(get_current_user)
 ) -> JSONResponse:
-    """Lazily generate (or return the already-cached) AI narrative for an object.
-
-    Called by result.html's client-side JS strictly after the main page has already
-    rendered with the scientific data, so a slow Gemini call never blocks the page
-    the user is actually waiting on. See ensure_ai_summary()'s docstring for the
-    caching/skip rules this follows.
-
-    Decision D: subject to a per-client rate limit (checked before Decision B's
-    per-object cooldown even applies) -- see app/ratelimit.py for why this is a
-    separate layer, not a replacement for the cooldown.
-
-    Decision F: if the caller is logged in, also persists their personal snapshot
-    of the resulting summary. Anonymous callers are unaffected -- no snapshot row,
-    since there's no user_id to attach one to.
-    """
+    """Return the AI narrative for an object, generating it on demand."""
     subject_type = "user" if current_user is not None else "session"
     subject_id = str(current_user.id) if current_user is not None else get_session_id(request)
     try:
@@ -193,20 +159,7 @@ async def object_summary(
 async def object_summary_regenerate(
     request: Request, simbad_main_id: str, current_user: User | None = Depends(get_current_user)
 ) -> JSONResponse:
-    """Force-regenerate the AI narrative for an object, subject to Decision D's
-    per-client rate limit AND Decision B's per-object cooldown (see
-    regenerate_ai_summary()'s docstring in app/cache.py and app/ratelimit.py's
-    module docstring for what each does and doesn't protect against).
-
-    The Retry-After header and JSON body's retry_after_seconds are the
-    server-side source of truth the client-side countdown in result.html is built
-    from; disabling the button client-side alone would be trivially bypassed by
-    calling this endpoint directly, so the 429 here is the actual enforcement.
-
-    Decision F: if the caller is logged in, also persists their personal snapshot
-    of the resulting summary, in addition to the shared canonical update
-    regenerate_ai_summary() already performs.
-    """
+    """Regenerate an object's AI narrative, enforcing server-side limits."""
     subject_type = "user" if current_user is not None else "session"
     subject_id = str(current_user.id) if current_user is not None else get_session_id(request)
     try:
@@ -251,12 +204,7 @@ async def api_resolve(q: str | None = None) -> JSONResponse:
 
 @app.get("/history", response_class=HTMLResponse)
 async def history(request: Request, current_user: User | None = Depends(get_current_user)) -> HTMLResponse:
-    """Show the most recently resolved objects from the cache database.
-
-    Decision C: this stays a global, site-wide feed rather than being scoped per
-    visitor -- see the accompanying explanation for why. Logged-in users get a link
-    to their own /account/saved list alongside it instead.
-    """
+    """Show the most recently resolved objects from the cache database."""
     objects = list_recent_objects(limit=10)
     if hasattr(objects, "__await__"):
         objects = await objects

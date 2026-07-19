@@ -148,8 +148,7 @@ class PlanetRecord(Base):
 
 
 class User(Base):
-    """A registered account. Decision F: session-cookie auth, no JWTs/token table --
-    see app/auth.py for the hashing and session helpers built around this model."""
+    """A registered account used by session-cookie auth."""
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -166,8 +165,7 @@ class User(Base):
 
 
 class SavedSearch(Base):
-    """A logged-in user's favorited object. Minimal MVP shape (Decision F) -- just
-    the user/object link plus a timestamp; no note/label field yet."""
+    """A logged-in user's favorited object."""
     __tablename__ = "saved_searches"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -182,14 +180,7 @@ class SavedSearch(Base):
 
 
 class UserSummarySnapshot(Base):
-    """A logged-in user's personal copy of an AI summary they generated/regenerated,
-    captured at the moment of that action (Decision F). Exists so a later Regenerate
-    by someone else can't silently change what this user sees for "their" version --
-    this is an ownership/no-clobber concern, not a request for the summary's actual
-    *content* to vary by user. The shared canonical ObjectRecord.ai_summary is
-    untouched by this table and remains the single global value every visitor sees
-    by default. Costs no extra Gemini calls: it persists text already produced by
-    the generate/regenerate action that triggered it."""
+    """A logged-in user's saved copy of an AI summary for one object."""
     __tablename__ = "user_summary_snapshots"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -205,19 +196,7 @@ class UserSummarySnapshot(Base):
 
 
 class RateLimitEvent(Base):
-    """One Gemini-quota-spending action (a Generate or Regenerate click), logged for
-    Decision D's real rate limiting. Deliberately NOT in the original handoff doc's
-    schema -- see the accompanying explanation for why an event-log table was chosen
-    over a counter column, and why "subject" is a (type, id) pair rather than a
-    users.id foreign key.
-
-    subject_type is 'user' or 'session': logged-in requests are limited per
-    users.id; anonymous requests are limited per Starlette session-cookie id (set by
-    SessionMiddleware for every visitor regardless of login state -- see
-    app/main.py). Using a string pair instead of a FK to users.id means one table
-    covers both cases uniformly, and rows survive a user's account being deleted
-    without needing ON DELETE handling on something that's really just a log entry.
-    """
+    """One logged request used for per-user or per-session rate limiting."""
     __tablename__ = "rate_limit_events"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)

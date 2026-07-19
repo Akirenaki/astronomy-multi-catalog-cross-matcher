@@ -18,11 +18,8 @@ from app.catalogs.simbad import normalize_query
 
 logger = logging.getLogger(__name__)
 
-# Per-object cooldown for POST /object/{id}/summary/regenerate. This is a UX guard
-# against accidental double-clicking on the same page -- it is NOT meaningful abuse
-# protection, since this app's cache is global (not per-user): someone could still
-# drain Gemini quota by clicking "Generate" across many *different* objects. Real
-# throttling (per-IP/session/user) would be a separate, larger feature.
+# Per-object cooldown for POST /object/{id}/summary/regenerate. It only prevents
+# rapid repeat clicks on the same object; per-client throttling is handled separately.
 AI_SUMMARY_COOLDOWN = timedelta(minutes=5)
 
 
@@ -59,11 +56,7 @@ async def get_cached(query_text: str) -> ObjectRecord | None:
 async def store_result(resolution_result: ResolutionResult, *, generate_ai_summary: bool = True) -> ObjectRecord:
     """Persist a resolution result and any associated identifiers or planets to the database."""
     async with SessionLocal() as session:
-        # Reuse the same row for a repeated query by finding any previous record first. We look
-        # up by BOTH query_text and simbad_main_id (when known) because those are two different
-        # search strings that can legitimately resolve to the same canonical object ("51 Peg" vs
-        # "HD 217014") -- and simbad_main_id is UNIQUE, so failing to catch that case here is what
-        # caused inserts to crash with IntegrityError on the second alias search for a given star.
+        # Reuse an existing row when this query or its canonical SIMBAD ID already exists.
         candidate_rows: list[ObjectRecord] = []
 
         by_query_text = await session.execute(
@@ -81,11 +74,7 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
             if row is not None and row not in candidate_rows:
                 candidate_rows.append(row)
 
-        # Delete every matching old row (there will almost always be zero or one, but two distinct
-        # rows are possible if this star was previously cached under a different query_text).
-        # NOTE: session.delete() on an AsyncSession returns a coroutine and must be awaited --
-        # omitting the await here previously left stale rows in place and caused
-        # "IntegrityError: UNIQUE constraint failed: objects.simbad_main_id" on re-resolution.
+        # Delete any matching stale rows before inserting the refreshed record.
         for stale_row in candidate_rows:
             await session.delete(stale_row)
         if candidate_rows:
@@ -146,9 +135,7 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
                 )
             )
 
-        # AI summaries are skipped for unresolved/ambiguous/failed-lookup results because
-        # they do not represent a confirmed object -- and for LOOKUP_FAILED specifically,
-        # there is no structured data yet for the narrative layer to safely describe.
+        # Skip AI summaries for unresolved, ambiguous, and failed-lookup results.
         if generate_ai_summary and resolution_result.state not in ("UNRESOLVED", "AMBIGUOUS", "LOOKUP_FAILED"):
             summary_payload = {
                 "main_id": resolution_result.main_id,
@@ -163,14 +150,7 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
             await session.commit()
         except IntegrityError:
             logger.info("Database commit stage: failed (IntegrityError) after %.3fs", time.perf_counter() - commit_started_at)
-            # The candidate_rows lookup above is a check-then-act sequence: two concurrent
-            # get_or_resolve() calls for the same brand-new star (e.g. a double-click, two
-            # browser tabs, or two workers) can both find zero existing rows and both reach
-            # this commit, since neither has committed yet when the other runs its SELECT.
-            # The second commit then violates the UNIQUE constraint on simbad_main_id. Rather
-            # than surfacing that as a 500 to the user, treat it the same as a cache hit:
-            # roll back this session's failed insert and return the row the other request
-            # just committed.
+                # Another request won the race to insert this object; reuse that row.
             await session.rollback()
             fallback_query = select(ObjectRecord).options(
                 selectinload(ObjectRecord.identifiers), selectinload(ObjectRecord.planets)
@@ -183,9 +163,7 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
             winner = result.scalars().first()
             if winner is not None:
                 return winner
-            # Extremely unlikely (the conflicting row would have to disappear between the
-            # failed commit and this re-query), but re-raise rather than returning None from
-            # a function whose return type promises an ObjectRecord.
+            # Re-raise if the conflicting row disappeared before we could fetch it.
             raise
         logger.info("Database commit stage: completed in %.3fs", time.perf_counter() - commit_started_at)
 
@@ -343,13 +321,7 @@ async def get_object_by_simbad_id(simbad_main_id: str) -> ObjectRecord | None:
 
 
 async def list_recent_objects(limit: int = 10) -> list[ObjectRecord]:
-    """Return the newest object records, ordered from most recently resolved to oldest.
-
-    Decision C note: this remains a global, site-wide feed by design -- see the
-    accompanying explanation for why "scoping /history per visitor" turned out not
-    to be the right fix. Personal history for logged-in users lives in
-    saved_searches (list_favorites, below) instead.
-    """
+    """Return the newest object records, ordered from most recent to oldest."""
     async with SessionLocal() as session:
         result = await session.execute(
             select(ObjectRecord).order_by(ObjectRecord.resolved_at.desc()).limit(limit)
