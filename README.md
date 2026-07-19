@@ -353,6 +353,8 @@ Was SIMBAD actually reachable, and did it return a usable response?
 
 **Each state is mutually exclusive and exhaustive** — every possible search outcome falls into exactly one bucket.
 
+</details>
+
 ### **C. "My saved summary looks different from what's shown to everyone else now — is that a bug?"**
 
 <details>
@@ -424,5 +426,3 @@ This project depends on a few external data sources and APIs. The app uses them 
 - **SIMBAD.** SIMBAD is the source of the primary object resolution step. If you reuse this project or publish derived results, include SIMBAD attribution or citation as required by their current data-use guidance.
 - **NASA Exoplanet Archive.** Exoplanet data comes from the NASA Exoplanet Archive. If you reuse catalog output or publish derived results, follow NASA's citation guidance for the archive.
 - **Gemini API.** AI summaries are generated through Google's Gemini API. Any use of that feature is subject to Google's current API terms and related policies.
-
-If you want the README to be stricter, you can add exact citation text or links for each service once you've confirmed the current wording from their documentation.
