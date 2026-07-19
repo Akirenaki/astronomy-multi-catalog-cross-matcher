@@ -1,23 +1,44 @@
 """FastAPI application entry point and route definitions."""
 
 import logging
+import os
+import secrets
 from contextlib import asynccontextmanager
+from urllib.parse import quote
 
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import Depends, FastAPI, Form, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from jinja2 import Environment, FileSystemLoader
+from starlette.middleware.sessions import SessionMiddleware
 
+from app.auth import (
+    DuplicateEmailError,
+    authenticate,
+    create_user,
+    get_current_user,
+    get_session_id,
+    log_in_session,
+    log_out_session,
+)
 from app.cache import (
     AI_SUMMARY_COOLDOWN,
     CooldownActiveError,
+    add_favorite,
     ensure_ai_summary,
     get_object_by_simbad_id,
+    get_object_id_by_simbad_id,
     get_or_resolve,
+    is_favorited,
+    list_favorites,
     list_recent_objects,
     regenerate_ai_summary,
+    remove_favorite,
+    save_user_summary_snapshot,
 )
 from app.database import init_db
+from app.models import User
 from app.narrative import render_summary_markdown
+from app.ratelimit import RateLimitExceededError, check_and_record
 
 # uvicorn's default logging config only sets up its own "uvicorn"/"uvicorn.error"/
 # "uvicorn.access" loggers -- it does not touch the root logger. Every app.* module
@@ -30,6 +51,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -41,25 +63,50 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Astronomy Multi-Catalog Cross-Matcher", lifespan=lifespan)
+
+# Decision F: session-cookie auth via Starlette's SessionMiddleware. Also the shared
+# infra Decision D's anonymous rate limiting rides on (see app.auth.get_session_id) --
+# every visitor gets a signed session cookie once this is installed, whether or not
+# they ever log in.
+#
+# SESSION_SECRET_KEY should be set explicitly in any real deployment: without it,
+# this falls back to a freshly generated key on every process start, which means (a)
+# all sessions -- including logins -- are invalidated on every restart, and (b)
+# running multiple worker processes would give each one a different key, breaking
+# sessions for requests that land on a different worker than the one that issued the
+# cookie. That's an acceptable trade for solo local development, not for anything
+# public-facing.
+_session_secret_key = os.getenv("SESSION_SECRET_KEY")
+if not _session_secret_key:
+    _session_secret_key = secrets.token_hex(32)
+    logger.warning(
+        "SESSION_SECRET_KEY not set -- using a randomly generated key for this "
+        "process only. Sessions will not survive a restart. Set SESSION_SECRET_KEY "
+        "explicitly before deploying anywhere beyond local single-process dev."
+    )
+app.add_middleware(SessionMiddleware, secret_key=_session_secret_key)
+
 # Load HTML templates from the templates directory so each route can render pages.
 env = Environment(loader=FileSystemLoader("app/templates"))
 env.filters["render_summary_markdown"] = render_summary_markdown
 
 
 @app.get("/", response_class=HTMLResponse)
-async def home(request: Request) -> HTMLResponse:
+async def home(request: Request, current_user: User | None = Depends(get_current_user)) -> HTMLResponse:
     """Render the landing page for the web interface."""
     template = env.get_template("index.html")
-    html = template.render(request=request)
+    html = template.render(request=request, current_user=current_user)
     return HTMLResponse(content=html)
 
 
 @app.get("/search", response_class=HTMLResponse)
-async def search(request: Request, q: str | None = None) -> HTMLResponse:
+async def search(
+    request: Request, q: str | None = None, current_user: User | None = Depends(get_current_user)
+) -> HTMLResponse:
     """Resolve a search query and render the details page, or fall back to the home page when empty."""
     if not q:
         template = env.get_template("index.html")
-        html = template.render(request=request)
+        html = template.render(request=request, current_user=current_user)
         return HTMLResponse(content=html)
 
     # Resolve the query through the cache/resolver pipeline and render the result page.
@@ -69,13 +116,18 @@ async def search(request: Request, q: str | None = None) -> HTMLResponse:
     # result.html's client-side JS calling GET /object/{id}/summary -- the same
     # "results first, AI overview second" pattern search engines use.
     result = await get_or_resolve(q, generate_ai_summary=False)
+    favorited = False
+    if current_user is not None and result.id is not None:
+        favorited = await is_favorited(current_user.id, result.id)
     template = env.get_template("result.html")
-    html = template.render(request=request, object=result)
+    html = template.render(request=request, object=result, current_user=current_user, favorited=favorited)
     return HTMLResponse(content=html)
 
 
 @app.get("/object/{simbad_main_id}", response_class=HTMLResponse)
-async def object_profile(request: Request, simbad_main_id: str) -> HTMLResponse:
+async def object_profile(
+    request: Request, simbad_main_id: str, current_user: User | None = Depends(get_current_user)
+) -> HTMLResponse:
     """Display a previously stored object profile using its SIMBAD identifier.
 
     Honors the same TTL as /search: if the cached row for this id has expired (or
@@ -85,39 +137,88 @@ async def object_profile(request: Request, simbad_main_id: str) -> HTMLResponse:
     obj = await get_object_by_simbad_id(simbad_main_id)
     if obj is None:
         obj = await get_or_resolve(simbad_main_id, generate_ai_summary=False)
+    favorited = False
+    if current_user is not None and obj.id is not None:
+        favorited = await is_favorited(current_user.id, obj.id)
     template = env.get_template("result.html")
-    html = template.render(request=request, object=obj)
+    html = template.render(request=request, object=obj, current_user=current_user, favorited=favorited)
     return HTMLResponse(content=html)
 
 
 @app.get("/object/{simbad_main_id}/summary")
-async def object_summary(simbad_main_id: str) -> JSONResponse:
+async def object_summary(
+    request: Request, simbad_main_id: str, current_user: User | None = Depends(get_current_user)
+) -> JSONResponse:
     """Lazily generate (or return the already-cached) AI narrative for an object.
 
     Called by result.html's client-side JS strictly after the main page has already
     rendered with the scientific data, so a slow Gemini call never blocks the page
     the user is actually waiting on. See ensure_ai_summary()'s docstring for the
     caching/skip rules this follows.
+
+    Decision D: subject to a per-client rate limit (checked before Decision B's
+    per-object cooldown even applies) -- see app/ratelimit.py for why this is a
+    separate layer, not a replacement for the cooldown.
+
+    Decision F: if the caller is logged in, also persists their personal snapshot
+    of the resulting summary. Anonymous callers are unaffected -- no snapshot row,
+    since there's no user_id to attach one to.
     """
+    subject_type = "user" if current_user is not None else "session"
+    subject_id = str(current_user.id) if current_user is not None else get_session_id(request)
+    try:
+        await check_and_record(subject_type, subject_id)
+    except RateLimitExceededError as exc:
+        response = JSONResponse(
+            {"error": "Rate limit exceeded", "retry_after_seconds": exc.retry_after_seconds},
+            status_code=429,
+        )
+        response.headers["Retry-After"] = str(exc.retry_after_seconds)
+        return response
+
     try:
         summary = await ensure_ai_summary(simbad_main_id)
     except LookupError:
         return JSONResponse({"error": "Object not found"}, status_code=404)
+
+    if current_user is not None:
+        object_id = await get_object_id_by_simbad_id(simbad_main_id)
+        if object_id is not None:
+            await save_user_summary_snapshot(current_user.id, object_id, summary)
+
     return JSONResponse({"summary": summary, "summary_html": render_summary_markdown(summary)})
 
 
 @app.post("/object/{simbad_main_id}/summary/regenerate")
-async def object_summary_regenerate(simbad_main_id: str) -> JSONResponse:
-    """Force-regenerate the AI narrative for an object, subject to a per-object
-    cooldown. See regenerate_ai_summary()'s docstring (app/cache.py) for exactly
-    what this cooldown does and doesn't protect against -- it's a UX guard against
-    double-clicking, not abuse protection, since the underlying cache is global.
+async def object_summary_regenerate(
+    request: Request, simbad_main_id: str, current_user: User | None = Depends(get_current_user)
+) -> JSONResponse:
+    """Force-regenerate the AI narrative for an object, subject to Decision D's
+    per-client rate limit AND Decision B's per-object cooldown (see
+    regenerate_ai_summary()'s docstring in app/cache.py and app/ratelimit.py's
+    module docstring for what each does and doesn't protect against).
 
     The Retry-After header and JSON body's retry_after_seconds are the
     server-side source of truth the client-side countdown in result.html is built
     from; disabling the button client-side alone would be trivially bypassed by
     calling this endpoint directly, so the 429 here is the actual enforcement.
+
+    Decision F: if the caller is logged in, also persists their personal snapshot
+    of the resulting summary, in addition to the shared canonical update
+    regenerate_ai_summary() already performs.
     """
+    subject_type = "user" if current_user is not None else "session"
+    subject_id = str(current_user.id) if current_user is not None else get_session_id(request)
+    try:
+        await check_and_record(subject_type, subject_id)
+    except RateLimitExceededError as exc:
+        response = JSONResponse(
+            {"error": "Rate limit exceeded", "retry_after_seconds": exc.retry_after_seconds},
+            status_code=429,
+        )
+        response.headers["Retry-After"] = str(exc.retry_after_seconds)
+        return response
+
     try:
         summary = await regenerate_ai_summary(simbad_main_id)
     except LookupError:
@@ -129,6 +230,12 @@ async def object_summary_regenerate(simbad_main_id: str) -> JSONResponse:
         )
         response.headers["Retry-After"] = str(exc.retry_after_seconds)
         return response
+
+    if current_user is not None:
+        object_id = await get_object_id_by_simbad_id(simbad_main_id)
+        if object_id is not None:
+            await save_user_summary_snapshot(current_user.id, object_id, summary)
+
     return JSONResponse({"summary": summary, "cooldown_seconds": int(AI_SUMMARY_COOLDOWN.total_seconds())})
 
 
@@ -143,11 +250,152 @@ async def api_resolve(q: str | None = None) -> JSONResponse:
 
 
 @app.get("/history", response_class=HTMLResponse)
-async def history(request: Request) -> HTMLResponse:
-    """Show the most recently resolved objects from the cache database."""
+async def history(request: Request, current_user: User | None = Depends(get_current_user)) -> HTMLResponse:
+    """Show the most recently resolved objects from the cache database.
+
+    Decision C: this stays a global, site-wide feed rather than being scoped per
+    visitor -- see the accompanying explanation for why. Logged-in users get a link
+    to their own /account/saved list alongside it instead.
+    """
     objects = list_recent_objects(limit=10)
     if hasattr(objects, "__await__"):
         objects = await objects
     template = env.get_template("history.html")
-    html = template.render(request=request, objects=objects)
+    html = template.render(request=request, objects=objects, current_user=current_user)
+    return HTMLResponse(content=html)
+
+
+def _safe_next_path(next_path: str | None) -> str:
+    """Validate a next= redirect target, defaulting to "/" for anything unsafe.
+
+    Only accepts a path that starts with a single "/" (not "//..." or
+    "/\\...", both of which browsers can interpret as protocol-relative URLs
+    pointing at an attacker-controlled host) -- this is the standard open-redirect
+    guard for a same-origin "return to where you were" parameter.
+    """
+    if not next_path:
+        return "/"
+    if not next_path.startswith("/"):
+        return "/"
+    if next_path.startswith("//") or next_path.startswith("/\\"):
+        return "/"
+    return next_path
+
+
+@app.get("/register", response_class=HTMLResponse)
+async def register_form(request: Request, next: str | None = None) -> HTMLResponse:
+    """Render the registration form."""
+    template = env.get_template("register.html")
+    html = template.render(request=request, error=None, next=_safe_next_path(next) if next else None)
+    return HTMLResponse(content=html)
+
+
+@app.post("/register", response_class=HTMLResponse, response_model=None)
+async def register_submit(
+    request: Request, email: str = Form(...), password: str = Form(...), next: str | None = Form(None)
+) -> HTMLResponse | RedirectResponse:
+    """Create a new user, hash their password, and log them in on success.
+
+    Duplicate emails and invalid passwords are caught explicitly and re-render the
+    form with an error rather than surfacing a raw 500 -- see create_user()'s
+    docstring in app/auth.py for the insert-then-catch-IntegrityError pattern this
+    relies on.
+    """
+    normalized_email = email.strip().lower()
+    try:
+        user = await create_user(email=normalized_email, password=password)
+    except DuplicateEmailError:
+        template = env.get_template("register.html")
+        html = template.render(request=request, error="That email is already registered.", next=next)
+        return HTMLResponse(content=html, status_code=400)
+    except ValueError as exc:
+        template = env.get_template("register.html")
+        html = template.render(request=request, error=str(exc), next=next)
+        return HTMLResponse(content=html, status_code=400)
+
+    log_in_session(request, user)
+    return RedirectResponse(url=_safe_next_path(next), status_code=303)
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_form(request: Request, next: str | None = None) -> HTMLResponse:
+    """Render the login form."""
+    template = env.get_template("login.html")
+    html = template.render(request=request, error=None, next=_safe_next_path(next) if next else None)
+    return HTMLResponse(content=html)
+
+
+@app.post("/login", response_class=HTMLResponse, response_model=None)
+async def login_submit(
+    request: Request, email: str = Form(...), password: str = Form(...), next: str | None = Form(None)
+) -> HTMLResponse | RedirectResponse:
+    """Verify credentials and log the user in via session on success."""
+    user = await authenticate(email.strip().lower(), password)
+    if user is None:
+        template = env.get_template("login.html")
+        html = template.render(request=request, error="Incorrect email or password.", next=next)
+        return HTMLResponse(content=html, status_code=400)
+
+    log_in_session(request, user)
+    return RedirectResponse(url=_safe_next_path(next), status_code=303)
+
+
+@app.post("/logout")
+async def logout(request: Request) -> RedirectResponse:
+    """Clear the current session's logged-in state."""
+    log_out_session(request)
+    return RedirectResponse(url="/", status_code=303)
+
+
+@app.post("/object/{simbad_main_id}/favorite", response_model=None)
+async def favorite_object(
+    request: Request, simbad_main_id: str, current_user: User | None = Depends(get_current_user)
+) -> RedirectResponse | JSONResponse:
+    """Favorite an object for the logged-in user. Requires login; anonymous
+    attempts are redirected to the login page rather than silently ignored."""
+    if current_user is None:
+        return RedirectResponse(url=f"/login?next=/object/{quote(simbad_main_id, safe='')}", status_code=303)
+
+    object_id = await get_object_id_by_simbad_id(simbad_main_id)
+    if object_id is None:
+        return JSONResponse({"error": "Object not found"}, status_code=404)
+
+    await add_favorite(current_user.id, object_id)
+    return RedirectResponse(url=f"/object/{quote(simbad_main_id, safe='')}", status_code=303)
+
+
+@app.post("/object/{simbad_main_id}/unfavorite", response_model=None)
+async def unfavorite_object(
+    request: Request, simbad_main_id: str, current_user: User | None = Depends(get_current_user)
+) -> RedirectResponse | JSONResponse:
+    """Remove an object from the logged-in user's favorites. Requires login."""
+    if current_user is None:
+        return RedirectResponse(url=f"/login?next=/object/{quote(simbad_main_id, safe='')}", status_code=303)
+
+    object_id = await get_object_id_by_simbad_id(simbad_main_id)
+    if object_id is None:
+        return JSONResponse({"error": "Object not found"}, status_code=404)
+
+    await remove_favorite(current_user.id, object_id)
+    return RedirectResponse(url=f"/object/{quote(simbad_main_id, safe='')}", status_code=303)
+
+
+@app.get("/account/saved", response_class=HTMLResponse, response_model=None)
+async def account_saved(
+    request: Request, current_user: User | None = Depends(get_current_user)
+) -> HTMLResponse | RedirectResponse:
+    """List the logged-in user's favorited objects.
+
+    Each entry shows the user's own personal AI-summary snapshot if they've ever
+    generated/regenerated one for that object, falling back to the shared canonical
+    ObjectRecord.ai_summary if they favorited an object without ever generating one
+    themselves (e.g. they favorited it while someone else's summary was already
+    showing, or before any summary existed at all).
+    """
+    if current_user is None:
+        return RedirectResponse(url="/login?next=/account/saved", status_code=303)
+
+    favorites = await list_favorites(current_user.id)
+    template = env.get_template("account_saved.html")
+    html = template.render(request=request, current_user=current_user, favorites=favorites)
     return HTMLResponse(content=html)

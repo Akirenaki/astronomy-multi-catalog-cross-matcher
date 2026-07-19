@@ -145,3 +145,86 @@ class PlanetRecord(Base):
             "discovery_year": self.discovery_year,
             "discovery_method": self.discovery_method,
         }
+
+
+class User(Base):
+    """A registered account. Decision F: session-cookie auth, no JWTs/token table --
+    see app/auth.py for the hashing and session helpers built around this model."""
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    saved_searches: Mapped[List["SavedSearch"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    summary_snapshots: Mapped[List["UserSummarySnapshot"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+
+
+class SavedSearch(Base):
+    """A logged-in user's favorited object. Minimal MVP shape (Decision F) -- just
+    the user/object link plus a timestamp; no note/label field yet."""
+    __tablename__ = "saved_searches"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    object_id: Mapped[int] = mapped_column(ForeignKey("objects.id", ondelete="CASCADE"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    user: Mapped[User] = relationship(back_populates="saved_searches")
+    object: Mapped[ObjectRecord] = relationship()
+
+    __table_args__ = (UniqueConstraint("user_id", "object_id", name="uq_saved_search"),)
+
+
+class UserSummarySnapshot(Base):
+    """A logged-in user's personal copy of an AI summary they generated/regenerated,
+    captured at the moment of that action (Decision F). Exists so a later Regenerate
+    by someone else can't silently change what this user sees for "their" version --
+    this is an ownership/no-clobber concern, not a request for the summary's actual
+    *content* to vary by user. The shared canonical ObjectRecord.ai_summary is
+    untouched by this table and remains the single global value every visitor sees
+    by default. Costs no extra Gemini calls: it persists text already produced by
+    the generate/regenerate action that triggered it."""
+    __tablename__ = "user_summary_snapshots"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    object_id: Mapped[int] = mapped_column(ForeignKey("objects.id", ondelete="CASCADE"), nullable=False)
+    summary_text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    user: Mapped[User] = relationship(back_populates="summary_snapshots")
+    object: Mapped[ObjectRecord] = relationship()
+
+    __table_args__ = (UniqueConstraint("user_id", "object_id", name="uq_user_summary_snapshot"),)
+
+
+class RateLimitEvent(Base):
+    """One Gemini-quota-spending action (a Generate or Regenerate click), logged for
+    Decision D's real rate limiting. Deliberately NOT in the original handoff doc's
+    schema -- see the accompanying explanation for why an event-log table was chosen
+    over a counter column, and why "subject" is a (type, id) pair rather than a
+    users.id foreign key.
+
+    subject_type is 'user' or 'session': logged-in requests are limited per
+    users.id; anonymous requests are limited per Starlette session-cookie id (set by
+    SessionMiddleware for every visitor regardless of login state -- see
+    app/main.py). Using a string pair instead of a FK to users.id means one table
+    covers both cases uniformly, and rows survive a user's account being deleted
+    without needing ON DELETE handling on something that's really just a log entry.
+    """
+    __tablename__ = "rate_limit_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    subject_type: Mapped[str] = mapped_column(String, nullable=False)
+    subject_id: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        CheckConstraint("subject_type IN ('user','session')", name="ck_rate_limit_subject_type"),
+    )

@@ -1,6 +1,11 @@
 fastapi==0.139.0
 uvicorn[standard]
 httpx==0.28.1
+# Not imported directly anywhere in app/ -- required transitively by
+# starlette.testclient.TestClient (used throughout tests/), which imports httpx2
+# preferentially and only falls back to httpx with a StarletteDeprecationWarning if
+# it's missing. Confirmed by uninstalling it and re-running the suite. See
+# app/catalogs/*.py for the actual runtime HTTP client, which is plain httpx.
 httpx2==2.7.0
 sqlalchemy
 aiosqlite
@@ -9,5 +14,8 @@ jinja2
 google-genai
 python-dotenv
 markdown-it-py
+bcrypt
+itsdangerous
+python-multipart
 pytest
 pytest-asyncio

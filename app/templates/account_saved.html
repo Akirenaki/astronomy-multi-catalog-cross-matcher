@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Saved objects</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 2rem; line-height: 1.5; }
+    .card { border: 1px solid #ddd; padding: 1rem; border-radius: 8px; max-width: 900px; }
+    .item { border-top: 1px solid #eee; padding: 1rem 0; }
+    .item:first-child { border-top: none; }
+    .summary-note { color: #666; font-size: 0.85em; margin-top: 0.25rem; }
+    form.unfavorite { display: inline; }
+    button.link-button { background: none; border: none; color: #0645ad; text-decoration: underline; cursor: pointer; padding: 0; font: inherit; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Your saved objects</h1>
+    {% if favorites %}
+      {% for entry in favorites %}
+        <div class="item">
+          <p>
+            <a href="/object/{{ entry.object.simbad_main_id | urlencode }}">
+              <strong>{{ entry.object.query_text }}</strong>
+            </a>
+            — {{ entry.object.resolution_state }}
+            {% if entry.object.simbad_main_id %} | {{ entry.object.simbad_main_id }}{% endif %}
+          </p>
+          {% set summary_text = entry.personal_summary or entry.object.ai_summary %}
+          {% if summary_text %}
+            <div>{{ summary_text | render_summary_markdown }}</div>
+            <p class="summary-note">
+              {% if entry.used_fallback_summary %}
+                Showing the shared summary (you haven't generated your own for this object).
+              {% else %}
+                Showing your personal summary from when you generated it.
+              {% endif %}
+            </p>
+          {% else %}
+            <p class="summary-note">No summary generated yet.</p>
+          {% endif %}
+          <form class="unfavorite" action="/object/{{ entry.object.simbad_main_id | urlencode }}/unfavorite" method="post">
+            <button type="submit" class="link-button">Remove from saved</button>
+          </form>
+        </div>
+      {% endfor %}
+    {% else %}
+      <p>You haven't saved any objects yet.</p>
+    {% endif %}
+    <p><a href="/">Back to search</a></p>
+  </div>
+</body>
+</html>

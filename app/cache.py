@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from app.database import SessionLocal
-from app.models import ObjectRecord, IdentifierRecord, PlanetRecord
+from app.models import ObjectRecord, IdentifierRecord, PlanetRecord, SavedSearch, UserSummarySnapshot
 from app.narrative import generate_summary
 from app.resolver import ResolutionResult, resolve_query
 from app.catalogs.simbad import normalize_query
@@ -343,9 +343,150 @@ async def get_object_by_simbad_id(simbad_main_id: str) -> ObjectRecord | None:
 
 
 async def list_recent_objects(limit: int = 10) -> list[ObjectRecord]:
-    """Return the newest object records, ordered from most recently resolved to oldest."""
+    """Return the newest object records, ordered from most recently resolved to oldest.
+
+    Decision C note: this remains a global, site-wide feed by design -- see the
+    accompanying explanation for why "scoping /history per visitor" turned out not
+    to be the right fix. Personal history for logged-in users lives in
+    saved_searches (list_favorites, below) instead.
+    """
     async with SessionLocal() as session:
         result = await session.execute(
             select(ObjectRecord).order_by(ObjectRecord.resolved_at.desc()).limit(limit)
         )
         return list(result.scalars().all())
+
+
+async def get_object_id_by_simbad_id(simbad_main_id: str) -> int | None:
+    """Look up an ObjectRecord's primary key by SIMBAD id, ignoring TTL expiry.
+
+    Favoriting/snapshotting an object shouldn't fail just because its cached
+    scientific data is due for a refresh -- expires_at governs re-resolution
+    freshness (see get_cached), not whether the row is allowed to exist. Mirrors
+    the TTL-agnostic lookups already used by ensure_ai_summary/regenerate_ai_summary.
+    """
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(ObjectRecord.id).where(ObjectRecord.simbad_main_id == simbad_main_id)
+        )
+        return result.scalar_one_or_none()
+
+
+async def add_favorite(user_id: int, object_id: int) -> SavedSearch:
+    """Favorite an object for a user. Idempotent: favoriting an already-favorited
+    object returns the existing row rather than raising, since re-clicking an
+    already-active Favorite button is a normal UI interaction, not an error."""
+    async with SessionLocal() as session:
+        existing = await session.execute(
+            select(SavedSearch).where(SavedSearch.user_id == user_id, SavedSearch.object_id == object_id)
+        )
+        row = existing.scalar_one_or_none()
+        if row is not None:
+            return row
+
+        row = SavedSearch(user_id=user_id, object_id=object_id)
+        session.add(row)
+        try:
+            await session.commit()
+        except IntegrityError:
+            # Concurrent double-click race, same pattern as store_result()'s
+            # candidate_rows handling: someone else's favorite for this exact pair
+            # committed first. Treat it as success rather than a 500.
+            await session.rollback()
+            existing = await session.execute(
+                select(SavedSearch).where(SavedSearch.user_id == user_id, SavedSearch.object_id == object_id)
+            )
+            return existing.scalar_one()
+        await session.refresh(row)
+        return row
+
+
+async def remove_favorite(user_id: int, object_id: int) -> bool:
+    """Unfavorite an object for a user. Returns True if a row was removed, False if
+    it wasn't favorited in the first place (also not an error -- same idempotent
+    reasoning as add_favorite)."""
+    async with SessionLocal() as session:
+        existing = await session.execute(
+            select(SavedSearch).where(SavedSearch.user_id == user_id, SavedSearch.object_id == object_id)
+        )
+        row = existing.scalar_one_or_none()
+        if row is None:
+            return False
+        await session.delete(row)
+        await session.commit()
+        return True
+
+
+async def is_favorited(user_id: int, object_id: int) -> bool:
+    """Whether this user has already favorited this object -- drives whether
+    result.html renders a Favorite or Unfavorite button."""
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(SavedSearch.id).where(SavedSearch.user_id == user_id, SavedSearch.object_id == object_id)
+        )
+        return result.scalar_one_or_none() is not None
+
+
+async def list_favorites(user_id: int) -> list[dict]:
+    """Return this user's favorited objects, newest favorite first, each paired with
+    their personal summary snapshot if one exists (falling back to the shared
+    canonical ai_summary otherwise -- see GET /account/saved's docstring in
+    app/main.py for when that fallback applies)."""
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(SavedSearch)
+            .options(
+                selectinload(SavedSearch.object).selectinload(ObjectRecord.identifiers),
+                selectinload(SavedSearch.object).selectinload(ObjectRecord.planets),
+            )
+            .where(SavedSearch.user_id == user_id)
+            .order_by(SavedSearch.created_at.desc())
+        )
+        saved_rows = list(result.scalars().all())
+
+        object_ids = [row.object_id for row in saved_rows]
+        snapshots_by_object_id: dict[int, str] = {}
+        if object_ids:
+            snapshot_result = await session.execute(
+                select(UserSummarySnapshot).where(
+                    UserSummarySnapshot.user_id == user_id,
+                    UserSummarySnapshot.object_id.in_(object_ids),
+                )
+            )
+            for snapshot in snapshot_result.scalars().all():
+                snapshots_by_object_id[snapshot.object_id] = snapshot.summary_text
+
+        return [
+            {
+                "object": row.object,
+                "favorited_at": row.created_at,
+                "personal_summary": snapshots_by_object_id.get(row.object_id),
+                "used_fallback_summary": row.object_id not in snapshots_by_object_id,
+            }
+            for row in saved_rows
+        ]
+
+
+async def save_user_summary_snapshot(user_id: int, object_id: int, summary_text: str) -> None:
+    """Persist a logged-in user's personal copy of an AI summary they just
+    generated/regenerated. Upserts: each user has at most one snapshot per object
+    (their most recent own generation), enforced by the uq_user_summary_snapshot
+    constraint -- a second Generate/Regenerate by the *same* user intentionally
+    replaces their own snapshot; only *other* users' later actions are prevented
+    from doing so.
+    """
+    async with SessionLocal() as session:
+        existing = await session.execute(
+            select(UserSummarySnapshot).where(
+                UserSummarySnapshot.user_id == user_id, UserSummarySnapshot.object_id == object_id
+            )
+        )
+        row = existing.scalar_one_or_none()
+        if row is not None:
+            row.summary_text = summary_text
+            row.created_at = datetime.now(timezone.utc)
+        else:
+            session.add(
+                UserSummarySnapshot(user_id=user_id, object_id=object_id, summary_text=summary_text)
+            )
+        await session.commit()

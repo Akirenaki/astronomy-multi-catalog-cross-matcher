@@ -23,9 +23,22 @@
     .ai-summary-status { color: #666; font-size: 0.9em; margin-top: 0.4rem; }
     .ai-summary-content > :first-child { margin-top: 0; }
     .ai-summary-content > :last-child { margin-bottom: 0; }
+    nav { max-width: 900px; text-align: right; font-size: 0.9em; margin-bottom: 0.5rem; }
+    nav form { display: inline; }
+    nav button.link-button { background: none; border: none; color: #0645ad; text-decoration: underline; cursor: pointer; padding: 0; font: inherit; }
+    .favorite-form { margin-top: 0.75rem; }
   </style>
 </head>
 <body>
+  <nav>
+    {% if current_user %}
+      {{ current_user.email }} ·
+      <a href="/account/saved">Saved objects</a> ·
+      <form action="/logout" method="post"><button type="submit" class="link-button">Log out</button></form>
+    {% else %}
+      <a href="/login">Log in</a> · <a href="/register">Register</a>
+    {% endif %}
+  </nav>
   <div class="card">
     <h1>Resolution result</h1>
     {% if object %}
@@ -91,6 +104,21 @@
           {% endif %}
         </div>
         {% if object.resolution_state in ('RESOLVED', 'PARTIAL') %}
+          <div class="favorite-form">
+            {% if current_user %}
+              {% if favorited %}
+                <form action="/object/{{ object.simbad_main_id | urlencode }}/unfavorite" method="post">
+                  <button type="submit">★ Saved — remove</button>
+                </form>
+              {% else %}
+                <form action="/object/{{ object.simbad_main_id | urlencode }}/favorite" method="post">
+                  <button type="submit">☆ Save this object</button>
+                </form>
+              {% endif %}
+            {% else %}
+              <a href="/login?next=/object/{{ object.simbad_main_id | urlencode }}">Log in to save this object</a>
+            {% endif %}
+          </div>
           <div class="panel" style="margin-top:1rem;" id="ai-summary-panel" data-simbad-id="{{ object.simbad_main_id }}">
             <h2>AI-generated summary</h2>
             {% if object.ai_summary %}
@@ -200,6 +228,14 @@
 
           fetch('/object/' + encodeURIComponent(simbadId) + '/summary')
             .then(function (response) {
+              if (response.status === 429) {
+                return response.json().then(function (data) {
+                  var retryAfter = (data && data.retry_after_seconds)
+                    || parseInt(response.headers.get('Retry-After'), 10)
+                    || 0;
+                  throw new Error('rate-limited:' + retryAfter);
+                });
+              }
               if (!response.ok) throw new Error('Request failed: ' + response.status);
               return response.json();
             })
@@ -221,10 +257,24 @@
               panel.appendChild(newStatusEl);
               wireRegenerateButton(newRegenerateBtn, newStatusEl);
             })
-            .catch(function () {
-              textEl.textContent = 'Could not load the AI summary. Try again.';
+            .catch(function (err) {
               textEl.classList.remove('ai-summary-loading');
+              textEl.style.display = 'none';
               generateBtn.style.display = '';
+              if (err && err.message && err.message.indexOf('rate-limited:') === 0) {
+                var seconds = parseInt(err.message.split(':')[1], 10) || 0;
+                generateBtn.disabled = true;
+                generateBtn.textContent = seconds > 0
+                  ? 'Too many requests — try again in ' + seconds + 's'
+                  : 'Too many requests — try again shortly';
+                setTimeout(function () {
+                  generateBtn.disabled = false;
+                  generateBtn.textContent = 'Generate AI summary';
+                }, Math.max(1000, seconds * 1000));
+                return;
+              }
+              textEl.style.display = '';
+              textEl.textContent = 'Could not load the AI summary. Try again.';
             });
         });
       }
