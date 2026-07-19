@@ -1,57 +1,48 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Recent Searches</title>
-  <style>
-    body { font-family: Arial, sans-serif; margin: 2rem; line-height: 1.5; }
-    .card { border: 1px solid #ddd; padding: 1rem; border-radius: 8px; max-width: 800px; }
-    .item { border-top: 1px solid #eee; padding: 0.5rem 0; }
-    nav { max-width: 800px; text-align: right; font-size: 0.9em; margin-bottom: 0.5rem; }
-    nav form { display: inline; }
-    nav button.link-button { background: none; border: none; color: #0645ad; text-decoration: underline; cursor: pointer; padding: 0; font: inherit; }
-  </style>
-</head>
-<body>
-  <nav>
-    {% if current_user %}
-      {{ current_user.email }} ·
-      <a href="/account/saved">Saved objects</a> ·
-      <form action="/logout" method="post"><button type="submit" class="link-button">Log out</button></form>
-    {% else %}
-      <a href="/login">Log in</a> · <a href="/register">Register</a>
-    {% endif %}
-  </nav>
+{% extends "base.html" %}
+{% from "_macros.html" import status_badge %}
+{% block title %}Recent Searches &middot; Cross-Matcher{% endblock %}
+{% block content %}
   <div class="card">
-    <h1>Recent searches</h1>
-    <p style="font-size:0.9em;color:#666;">
-      This is a site-wide feed of everything recently resolved, not a personal
-      history.
+    <div class="section__header">
+      <h1 class="mb-0">Recently resolved</h1>
+      <span class="section__count">{{ objects|length }} objects</span>
+    </div>
+    <p class="text-secondary text-sm">
+      Site-wide feed of everything recently resolved &mdash; not a personal history.
       {% if current_user %}
         See your own <a href="/account/saved">saved objects</a> instead.
       {% else %}
         <a href="/login">Log in</a> to build a personal saved list.
       {% endif %}
     </p>
+
     {% if objects %}
-      {% for entry in objects %}
-        <div class="item">
-          {% if entry.simbad_main_id %}
-            <a href="/object/{{ entry.simbad_main_id | urlencode }}">
-              <strong>{{ entry.query_text }}</strong>
-            </a>
-          {% else %}
-            <strong>{{ entry.query_text }}</strong>
-          {% endif %}
-          — {{ entry.resolution_state }}
-          {% if entry.simbad_main_id %} | {{ entry.simbad_main_id }}{% endif %}
-        </div>
-      {% endfor %}
+      <table class="data-table data-table--rows-clickable mt-4">
+        <thead>
+          <tr>
+            <th>Query</th>
+            <th>Status</th>
+            <th>Main ID</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for entry in objects %}
+            <tr>
+              <td>
+                {% if entry.simbad_main_id %}
+                  <a href="/object/{{ entry.simbad_main_id | urlencode }}"><strong>{{ entry.query_text }}</strong></a>
+                {% else %}
+                  <strong>{{ entry.query_text }}</strong>
+                {% endif %}
+              </td>
+              <td>{{ status_badge(entry.resolution_state) }}</td>
+              <td class="mono text-secondary">{{ entry.simbad_main_id or '—' }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
     {% else %}
-      <p>No history yet.</p>
+      <div class="empty-state">No history yet &mdash; <a href="/">resolve your first object</a>.</div>
     {% endif %}
-    <p><a href="/">Back to search</a></p>
   </div>
-</body>
-</html>
+{% endblock %}

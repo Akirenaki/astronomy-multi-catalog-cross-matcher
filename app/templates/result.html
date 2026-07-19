@@ -1,144 +1,220 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Cross-Match Result</title>
-  <style>
-    body { font-family: Arial, sans-serif; margin: 2rem; line-height: 1.5; }
-    .card { border: 1px solid #ddd; padding: 1rem; border-radius: 8px; max-width: 900px; margin-bottom: 1rem; }
-    .panel { background: #f8f9fa; padding: 1rem; border-radius: 6px; }
-    .label { font-weight: bold; }
-    /* AI summary loading indicator: three dots that fade in and out in sequence,
-       rendered while the client-side fetch in the script below is in flight. */
-    .ai-summary-loading { color: #666; font-style: italic; }
-    .ai-summary-loading .dot { animation: ai-summary-dot-fade 1.4s infinite both; }
-    .ai-summary-loading .dot:nth-child(2) { animation-delay: 0.2s; }
-    .ai-summary-loading .dot:nth-child(3) { animation-delay: 0.4s; }
-    @keyframes ai-summary-dot-fade {
-      0%, 80%, 100% { opacity: 0; }
-      40% { opacity: 1; }
-    }
-    #generate-summary-btn, #regenerate-summary-btn { margin-top: 0.5rem; }
-    .ai-summary-status { color: #666; font-size: 0.9em; margin-top: 0.4rem; }
-    .ai-summary-content > :first-child { margin-top: 0; }
-    .ai-summary-content > :last-child { margin-bottom: 0; }
-    nav { max-width: 900px; text-align: right; font-size: 0.9em; margin-bottom: 0.5rem; }
-    nav form { display: inline; }
-    nav button.link-button { background: none; border: none; color: #0645ad; text-decoration: underline; cursor: pointer; padding: 0; font: inherit; }
-    .favorite-form { margin-top: 0.75rem; }
-  </style>
-</head>
-<body>
-  <nav>
-    {% if current_user %}
-      {{ current_user.email }} ·
-      <a href="/account/saved">Saved objects</a> ·
-      <form action="/logout" method="post"><button type="submit" class="link-button">Log out</button></form>
-    {% else %}
-      <a href="/login">Log in</a> · <a href="/register">Register</a>
-    {% endif %}
-  </nav>
-  <div class="card">
-    <h1>Resolution result</h1>
-    {% if object %}
-      <p><span class="label">State:</span> {{ object.resolution_state }}</p>
-      {% if object.resolution_state == 'AMBIGUOUS' %}
-        <div class="panel">
-          <h2>Multiple possible matches</h2>
-          <p>Your search matched more than one object in SIMBAD. Pick the one you meant:</p>
-          {% if object.candidates %}
-            <ul>
-              {% for candidate in object.candidates %}
-                <li>
-                  <a href="/search?q={{ candidate.main_id | urlencode }}">
-                    <strong>{{ candidate.main_id or '—' }}</strong>
-                  </a>
-                  — {{ candidate.otype or 'unknown type' }}{% if candidate.sp_type %}, {{ candidate.sp_type }}{% endif %}
-                  {% if candidate.ra is not none and candidate.dec is not none %}
-                    (RA {{ candidate.ra }}, Dec {{ candidate.dec }})
-                  {% endif %}
-                </li>
-              {% endfor %}
-            </ul>
-          {% else %}
-            <p>No candidate details were retained for this search.</p>
-          {% endif %}
-        </div>
-      {% elif object.resolution_state == 'LOOKUP_FAILED' %}
-        <div class="panel">
-          <h2>Couldn't reach SIMBAD</h2>
-          <p>
-            This query couldn't be resolved because the SIMBAD lookup itself failed —
-            a timeout, connection problem, or an unreadable response — not because
-            "{{ object.query_text }}" is a known non-match. This is different from
-            UNRESOLVED, which means SIMBAD was reached and genuinely has no record
-            for the query.
-          </p>
-          <p>
-            This is often caused by a network that blocks or can't route to
-            <code>simbad.cds.unistra.fr</code> (school/work networks and some
-            containerized dev environments commonly do this). Try again from a
-            different network, or retry now in case it was transient:
-          </p>
-          <p><a href="/search?q={{ object.query_text | urlencode }}">Retry this search</a></p>
-        </div>
-      {% else %}
-        <p><span class="label">Main ID:</span> {{ object.simbad_main_id or '—' }}</p>
-        <p><span class="label">Spectral type:</span> {{ object.spectral_type or '—' }}</p>
-        <p><span class="label">RA/Dec:</span> {{ object.ra_deg or '—' }}, {{ object.dec_deg or '—' }}</p>
-        {% if object.resolved_via %}
-          <p><span class="label">Resolved via:</span>
-            {{ object.resolved_via | select | join(' → ') }}
-          </p>
-        {% endif %}
-        <div class="panel">
-          <h2>Verified catalog data</h2>
-          <p><span class="label">Identifiers:</span> {{ object.identifiers|length }}</p>
-          <p><span class="label">Planets:</span> {{ object.planets|length }}</p>
-          {% if object.resolution_state == 'PARTIAL' %}
-            <p>No planets were found in the Exoplanet Archive for this object.</p>
-          {% endif %}
-          {% if object.resolution_state == 'UNRESOLVED' %}
-            <p>No SIMBAD match was found for this query.</p>
-          {% endif %}
-        </div>
-        {% if object.resolution_state in ('RESOLVED', 'PARTIAL') %}
-          <div class="favorite-form">
-            {% if current_user %}
-              {% if favorited %}
-                <form action="/object/{{ object.simbad_main_id | urlencode }}/unfavorite" method="post">
-                  <button type="submit">★ Saved — remove</button>
-                </form>
-              {% else %}
-                <form action="/object/{{ object.simbad_main_id | urlencode }}/favorite" method="post">
-                  <button type="submit">☆ Save this object</button>
-                </form>
-              {% endif %}
-            {% else %}
-              <a href="/login?next=/object/{{ object.simbad_main_id | urlencode }}">Log in to save this object</a>
-            {% endif %}
+{% extends "base.html" %}
+{% from "_macros.html" import status_badge, state_banner, state_icon %}
+{% block title %}{{ (object.simbad_main_id or object.query_text) if object else 'Result' }} &middot; Cross-Matcher{% endblock %}
+{% block content %}
+  {% if object %}
+    {% if object.resolution_state == 'AMBIGUOUS' %}
+      {{ state_banner('AMBIGUOUS', 'Multiple possible matches',
+        '<p>&#8220;' ~ object.query_text ~ '&#8221; matched more than one object in SIMBAD. Pick the one you meant.</p>') }}
+      <div class="card">
+        {% if object.candidates %}
+          <div class="candidate-list">
+            {% for candidate in object.candidates %}
+              <a class="candidate" href="/search?q={{ candidate.main_id | urlencode }}">
+                <div>
+                  <div class="candidate__id">{{ candidate.main_id or '—' }}</div>
+                  <div class="candidate__meta">
+                    {{ candidate.otype or 'unknown type' }}{% if candidate.sp_type %} &middot; {{ candidate.sp_type }}{% endif %}
+                    {% if candidate.ra is not none and candidate.dec is not none %}
+                      &middot; RA {{ candidate.ra }}, Dec {{ candidate.dec }}
+                    {% endif %}
+                  </div>
+                </div>
+                <span class="candidate__arrow">&rarr;</span>
+              </a>
+            {% endfor %}
           </div>
-          <div class="panel" style="margin-top:1rem;" id="ai-summary-panel" data-simbad-id="{{ object.simbad_main_id }}">
-            <h2>AI-generated summary</h2>
-            {% if object.ai_summary %}
-              <div id="ai-summary-text" class="ai-summary-content">{{ object.ai_summary | render_summary_markdown }}</div>
-              <button id="regenerate-summary-btn" type="button">Regenerate</button>
-              <p id="regenerate-status" class="ai-summary-status"></p>
-            {% else %}
-              <button id="generate-summary-btn" type="button">Generate AI summary</button>
-              <div id="ai-summary-text" class="ai-summary-loading ai-summary-content" style="display:none;">
-                Generating summary<span class="dot">.</span><span class="dot">.</span><span class="dot">.</span>
+        {% else %}
+          <p class="text-secondary text-sm mb-0">No candidate details were retained for this search.</p>
+        {% endif %}
+      </div>
+
+    {% elif object.resolution_state == 'LOOKUP_FAILED' %}
+      {{ state_banner('LOOKUP_FAILED', "Couldn't reach SIMBAD",
+        '<p>This query couldn&rsquo;t be resolved because the SIMBAD lookup itself failed &mdash; a
+        timeout, connection problem, or an unreadable response &mdash; not because &#8220;' ~ object.query_text ~
+        '&#8221; is a known non-match. This differs from UNRESOLVED, which means SIMBAD was
+        reached and genuinely has no record for the query.</p>
+        <p>This is often caused by a network that blocks or can&rsquo;t route to
+        <code>simbad.cds.unistra.fr</code> (school/work networks and some containerized
+        dev environments commonly do this).</p>') }}
+      <div class="card">
+        <a class="btn btn--primary" href="/search?q={{ object.query_text | urlencode }}">Retry this search</a>
+      </div>
+
+    {% else %}
+      {% if object.resolution_state == 'RESOLVED' %}
+        {{ state_banner('RESOLVED', 'Clean match',
+          '<p>A single, unambiguous SIMBAD record was found, with planetary data available from the NASA Exoplanet Archive where applicable.</p>') }}
+      {% elif object.resolution_state == 'PARTIAL' %}
+        {{ state_banner('PARTIAL', 'Matched, with gaps',
+          '<p>SIMBAD resolved this object, but no matching entry was found in the NASA Exoplanet Archive &mdash; either it has no known planets, or the archive doesn&rsquo;t cross-reference this identifier.</p>') }}
+      {% elif object.resolution_state == 'UNRESOLVED' %}
+        {{ state_banner('UNRESOLVED', 'No match found',
+          '<p>SIMBAD was reached successfully but has no record for &#8220;' ~ object.query_text ~ '&#8221;. Check the spelling or try a catalog identifier (e.g. HD, HIP, GJ, TYC) instead of an informal name.</p>') }}
+      {% endif %}
+
+      <div class="card">
+        <div class="object-header">
+          <div>
+            <div class="object-header__id">{{ object.simbad_main_id or '—' }}</div>
+            <div class="object-header__meta">
+              <span>{{ object.spectral_type or 'spectral type unknown' }}</span>
+              <span>RA {{ object.ra_deg if object.ra_deg is not none else '—' }}&deg;, Dec {{ object.dec_deg if object.dec_deg is not none else '—' }}&deg;</span>
+            </div>
+            {% if object.resolved_via %}
+              <div class="alias-chain">
+                <span class="alias-chain__label">Resolved via</span>
+                {% for step in object.resolved_via if step %}
+                  {% if not loop.first %}<span class="alias-chain__arrow">&rarr;</span>{% endif %}
+                  <span class="chip">{{ step }}</span>
+                {% endfor %}
               </div>
             {% endif %}
           </div>
+          {% if current_user %}
+            {% if favorited %}
+              <form action="/object/{{ object.simbad_main_id | urlencode }}/unfavorite" method="post">
+                <button type="submit" class="favorite-btn favorite-btn--active">★ Saved &mdash; remove</button>
+              </form>
+            {% else %}
+              <form action="/object/{{ object.simbad_main_id | urlencode }}/favorite" method="post">
+                <button type="submit" class="favorite-btn">☆ Save this object</button>
+              </form>
+            {% endif %}
+          {% else %}
+            <a class="favorite-btn" href="/login?next=/object/{{ object.simbad_main_id | urlencode }}">☆ Log in to save</a>
+          {% endif %}
+        </div>
+
+        <div class="section">
+          <div class="section__header">
+            <h3 class="mb-0">Verified catalog data</h3>
+          </div>
+          <dl class="kv-grid">
+            <div>
+              <dt>Identifiers</dt>
+              <dd>{{ object.identifiers|length }}</dd>
+            </div>
+            <div>
+              <dt>Planets</dt>
+              <dd>{{ object.planets|length }}</dd>
+            </div>
+            <div>
+              <dt>Object type</dt>
+              <dd>{{ object.otype or '—' }}</dd>
+            </div>
+            <div>
+              <dt>Resolved</dt>
+              <dd class="text-sm">{{ object.resolved_at.strftime('%Y-%m-%d %H:%M UTC') if object.resolved_at else '—' }}</dd>
+            </div>
+          </dl>
+        </div>
+
+        {% if object.identifiers %}
+          <div class="section">
+            <div class="section__header">
+              <h3 class="mb-0">Identifiers</h3>
+              <span class="section__count">{{ object.identifiers|length }}</span>
+            </div>
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Catalog</th>
+                  <th>Identifier</th>
+                  <th>In Exoplanet Archive</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for ident in object.identifiers %}
+                  <tr>
+                    <td class="mono text-secondary">{{ ident.catalog }}</td>
+                    <td class="mono">{{ ident.identifier }}</td>
+                    <td><span class="badge-dot {{ 'badge-dot--yes' if ident.matched_exoplanet_archive else 'badge-dot--no' }}"></span></td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
         {% endif %}
-      {% endif %}
-    {% else %}
-      <p>No object found.</p>
+
+        {% if object.planets %}
+          {% set ns = namespace(max_radius=0) %}
+          {% for planet in object.planets %}
+            {% if planet.planet_radius_earth and planet.planet_radius_earth > ns.max_radius %}
+              {% set ns.max_radius = planet.planet_radius_earth %}
+            {% endif %}
+          {% endfor %}
+          <div class="section">
+            <div class="section__header">
+              <h3 class="mb-0">Planetary system</h3>
+              <span class="section__count">{{ object.planets|length }}</span>
+            </div>
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Planet</th>
+                  <th>Radius (Earths)</th>
+                  <th class="num">Period (days)</th>
+                  <th class="num">Discovered</th>
+                  <th>Method</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for planet in object.planets %}
+                  <tr>
+                    <td class="mono">{{ planet.pl_name }}{% if planet.pl_letter %} <span class="text-tertiary">{{ planet.pl_letter }}</span>{% endif %}</td>
+                    <td>
+                      {% if planet.planet_radius_earth %}
+                        <div class="metric-bar">
+                          <div class="metric-bar__track">
+                            <div class="metric-bar__fill" style="width: {{ ((planet.planet_radius_earth / ns.max_radius) * 100) | round(0, 'floor') if ns.max_radius else 0 }}%;"></div>
+                          </div>
+                          <span class="mono text-sm">{{ planet.planet_radius_earth }}</span>
+                        </div>
+                      {% else %}
+                        <span class="text-tertiary">—</span>
+                      {% endif %}
+                    </td>
+                    <td class="num">{{ planet.orbital_period_days if planet.orbital_period_days is not none else '—' }}</td>
+                    <td class="num">{{ planet.discovery_year or '—' }}</td>
+                    <td class="text-secondary">{{ planet.discovery_method or '—' }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% endif %}
+
+        {% if object.resolution_state in ('RESOLVED', 'PARTIAL') %}
+          <div class="section">
+            <div id="ai-summary-panel" class="ai-panel" data-simbad-id="{{ object.simbad_main_id }}">
+              <div class="ai-panel__label">{{ state_icon('sparkle') }}AI-generated summary</div>
+              <p class="ai-panel__disclaimer">
+                Written by Gemini from the catalog data above &mdash; a narrative aid, not an independent data source.
+              </p>
+              {% if object.ai_summary %}
+                <div id="ai-summary-text" class="ai-summary-content">{{ object.ai_summary | render_summary_markdown }}</div>
+                <button id="regenerate-summary-btn" type="button" class="btn btn--sm">Regenerate</button>
+                <p id="regenerate-status" class="ai-summary-status"></p>
+              {% else %}
+                <button id="generate-summary-btn" type="button" class="btn btn--primary btn--sm">Generate AI summary</button>
+                <div id="ai-summary-text" class="ai-summary-loading ai-summary-content" style="display:none;">
+                  Generating summary<span class="dot">.</span><span class="dot">.</span><span class="dot">.</span>
+                </div>
+              {% endif %}
+            </div>
+          </div>
+        {% endif %}
+      </div>
     {% endif %}
-    <p><a href="/">Back to search</a></p>
-  </div>
+  {% else %}
+    <div class="card"><p class="mb-0">No object found.</p></div>
+  {% endif %}
+  <p class="text-sm"><a href="/">&larr; Back to search</a></p>
+{% endblock %}
+
+{% block extra_body %}
   <script>
     (function () {
       var panel = document.getElementById('ai-summary-panel');
@@ -249,6 +325,7 @@
               var newRegenerateBtn = document.createElement('button');
               newRegenerateBtn.type = 'button';
               newRegenerateBtn.id = 'regenerate-summary-btn';
+              newRegenerateBtn.className = 'btn btn--sm';
               newRegenerateBtn.textContent = 'Regenerate';
               var newStatusEl = document.createElement('p');
               newStatusEl.id = 'regenerate-status';
@@ -280,5 +357,4 @@
       }
     })();
   </script>
-</body>
-</html>
+{% endblock %}

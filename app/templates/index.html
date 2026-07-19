@@ -1,37 +1,25 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Astronomy Cross-Matcher</title>
-  <style>
-    body { font-family: Arial, sans-serif; margin: 2rem; line-height: 1.5; }
-    .card { border: 1px solid #ddd; padding: 1rem; border-radius: 8px; max-width: 700px; }
-    input[type="text"] { width: 70%; padding: 0.5rem; }
-    button { padding: 0.5rem 1rem; }
-    nav { max-width: 700px; text-align: right; font-size: 0.9em; margin-bottom: 0.5rem; }
-    nav form { display: inline; }
-    nav button.link-button { background: none; border: none; color: #0645ad; text-decoration: underline; cursor: pointer; padding: 0; font: inherit; }
-  </style>
-</head>
-<body>
-  <nav>
-    {% if current_user %}
-      {{ current_user.email }} ·
-      <a href="/account/saved">Saved objects</a> ·
-      <form action="/logout" method="post"><button type="submit" class="link-button">Log out</button></form>
-    {% else %}
-      <a href="/login">Log in</a> · <a href="/register">Register</a>
-    {% endif %}
-  </nav>
+{% extends "base.html" %}
+{% block title %}Astronomy Multi-Catalog Cross-Matcher{% endblock %}
+{% block page_modifier %} page--narrow{% endblock %}
+{% block content %}
   <div class="card">
-    <h1>Astronomy Multi-Catalog Cross-Matcher</h1>
-    <p>Resolve an informal star name across SIMBAD and the Exoplanet Archive.</p>
-    <form action="/search" method="get">
-      <input type="text" name="q" placeholder="Try 51 Peg or HD 217014" />
-      <button type="submit">Resolve</button>
+    <h1>Resolve an object across SIMBAD &amp; the Exoplanet Archive</h1>
+    <p class="text-secondary text-sm">
+      Enter an informal name, Bayer/Flamsteed designation, or catalog identifier.
+      The resolver checks SIMBAD first, then cross-matches against the NASA
+      Exoplanet Archive for known planets.
+    </p>
+    <form action="/search" method="get" class="search-form mt-4">
+      <input type="text" name="q" placeholder="51 Peg, HD 217014, Betelgeuse&hellip;" autofocus>
+      <button type="submit" class="btn btn--primary">Resolve</button>
     </form>
-    <p><a href="/history">View recent searches</a></p>
+    <div class="query-examples">
+      <span class="chip">51 Peg</span>
+      <span class="chip">HD 217014</span>
+      <span class="chip">HIP 113357</span>
+      <span class="chip">GJ 667 C</span>
+      <span class="chip">TYC 1949-2020-1</span>
+    </div>
   </div>
-</body>
-</html>
+  <p class="text-sm text-secondary"><a href="/history">View recently resolved objects &rarr;</a></p>
+{% endblock %}

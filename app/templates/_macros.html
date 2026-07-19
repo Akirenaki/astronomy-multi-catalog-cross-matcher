@@ -1,0 +1,54 @@
+{# Shared presentation helpers for resolution-state visuals.
+
+   Five resolution states exist (see app/models.py's ck_resolution_state
+   constraint): RESOLVED, PARTIAL, AMBIGUOUS, UNRESOLVED, LOOKUP_FAILED. Every
+   state gets its own colour triad (defined in static/css/main.css), its own
+   icon, and its own short explanation, so the five are distinguishable at a
+   glance and never confusable with each other -- in particular AMBIGUOUS
+   ("we found several, pick one") is deliberately not styled as an error the
+   way LOOKUP_FAILED ("we couldn't reach SIMBAD at all") is. #}
+
+{% set state_meta = {
+  "RESOLVED":      {"modifier": "resolved",   "icon": "check",   "label": "RESOLVED"},
+  "PARTIAL":       {"modifier": "partial",    "icon": "warning", "label": "PARTIAL"},
+  "AMBIGUOUS":     {"modifier": "ambiguous",  "icon": "help",    "label": "AMBIGUOUS"},
+  "UNRESOLVED":    {"modifier": "unresolved", "icon": "minus",   "label": "UNRESOLVED"},
+  "LOOKUP_FAILED": {"modifier": "failed",     "icon": "fault",   "label": "LOOKUP_FAILED"},
+} %}
+
+{% macro state_icon(icon) %}
+{%- if icon == "check" -%}
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.5 2.5L16 9.5"/></svg>
+{%- elif icon == "warning" -%}
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5 21 19H3z"/><path d="M12 10v4"/><path d="M12 16.5h.01"/></svg>
+{%- elif icon == "help" -%}
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.9.4-1 1-1 1.7"/><path d="M12 16.5h.01"/></svg>
+{%- elif icon == "minus" -%}
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12h8"/></svg>
+{%- elif icon == "fault" -%}
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 3 8v8l9 5 9-5V8z"/><path d="M12 9v4"/><path d="M12 15.5h.01"/></svg>
+{%- elif icon == "star" -%}
+<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 3.3l2.6 5.7 6.2.6-4.7 4.2 1.4 6.1L12 16.9l-5.5 3 1.4-6.1-4.7-4.2 6.2-.6z"/></svg>
+{%- elif icon == "sparkle" -%}
+<svg viewBox="0 0 24 24" fill="currentColor"><path d="M11 2.5 12.6 8 18 9.6 12.6 11.2 11 16.7 9.4 11.2 4 9.6 9.4 8z"/><path d="M18.3 15.2l.8 2.3 2.3.8-2.3.8-.8 2.3-.8-2.3-2.3-.8 2.3-.8z"/></svg>
+{%- endif -%}
+{% endmacro %}
+
+{% macro status_badge(state) %}
+{%- set meta = state_meta.get(state, {"modifier": "unresolved", "icon": "minus", "label": state}) -%}
+<span class="status-badge status-badge--{{ meta.modifier }}">{{ state_icon(meta.icon) }}{{ meta.label }}</span>
+{%- endmacro %}
+
+{% macro state_banner(state, title, body) %}
+{%- set meta = state_meta.get(state, {"modifier": "unresolved", "icon": "minus", "label": state}) -%}
+<div class="state-banner state-banner--{{ meta.modifier }}">
+  <div class="state-banner__icon">{{ state_icon(meta.icon) }}</div>
+  <div class="state-banner__body">
+    <div class="row" style="gap: 0.5rem; margin-bottom: 0.25rem;">
+      <span class="status-badge status-badge--{{ meta.modifier }}">{{ state_icon(meta.icon) }}{{ meta.label }}</span>
+    </div>
+    <h2>{{ title }}</h2>
+    {{ body }}
+  </div>
+</div>
+{%- endmacro %}

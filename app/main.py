@@ -8,6 +8,7 @@ from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -70,6 +71,10 @@ if not _session_secret_key:
         "explicitly before deploying anywhere beyond local single-process dev."
     )
 app.add_middleware(SessionMiddleware, secret_key=_session_secret_key)
+
+# Serve static assets (currently just the hand-rolled design-system CSS -- no
+# frontend build step in this project) at /static.
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 # Load HTML templates from the templates directory so each route can render pages.
 env = Environment(loader=FileSystemLoader("app/templates"))

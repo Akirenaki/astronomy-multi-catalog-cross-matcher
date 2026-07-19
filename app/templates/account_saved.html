@@ -1,54 +1,51 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Saved objects</title>
-  <style>
-    body { font-family: Arial, sans-serif; margin: 2rem; line-height: 1.5; }
-    .card { border: 1px solid #ddd; padding: 1rem; border-radius: 8px; max-width: 900px; }
-    .item { border-top: 1px solid #eee; padding: 1rem 0; }
-    .item:first-child { border-top: none; }
-    .summary-note { color: #666; font-size: 0.85em; margin-top: 0.25rem; }
-    form.unfavorite { display: inline; }
-    button.link-button { background: none; border: none; color: #0645ad; text-decoration: underline; cursor: pointer; padding: 0; font: inherit; }
-  </style>
-</head>
-<body>
+{% extends "base.html" %}
+{% from "_macros.html" import status_badge %}
+{% block title %}Saved objects &middot; Cross-Matcher{% endblock %}
+{% block content %}
   <div class="card">
-    <h1>Your saved objects</h1>
+    <div class="section__header">
+      <h1 class="mb-0">Your saved objects</h1>
+      {% if favorites %}<span class="section__count">{{ favorites|length }} saved</span>{% endif %}
+    </div>
+
     {% if favorites %}
-      {% for entry in favorites %}
-        <div class="item">
-          <p>
-            <a href="/object/{{ entry.object.simbad_main_id | urlencode }}">
-              <strong>{{ entry.object.query_text }}</strong>
-            </a>
-            — {{ entry.object.resolution_state }}
-            {% if entry.object.simbad_main_id %} | {{ entry.object.simbad_main_id }}{% endif %}
-          </p>
-          {% set summary_text = entry.personal_summary or entry.object.ai_summary %}
-          {% if summary_text %}
-            <div>{{ summary_text | render_summary_markdown }}</div>
-            <p class="summary-note">
-              {% if entry.used_fallback_summary %}
-                Showing the shared summary (you haven't generated your own for this object).
-              {% else %}
-                Showing your personal summary from when you generated it.
-              {% endif %}
-            </p>
-          {% else %}
-            <p class="summary-note">No summary generated yet.</p>
-          {% endif %}
-          <form class="unfavorite" action="/object/{{ entry.object.simbad_main_id | urlencode }}/unfavorite" method="post">
-            <button type="submit" class="link-button">Remove from saved</button>
-          </form>
-        </div>
-      {% endfor %}
+      <div class="stack mt-4">
+        {% for entry in favorites %}
+          <div class="panel">
+            <div class="row row--split">
+              <div>
+                <a href="/object/{{ entry.object.simbad_main_id | urlencode }}">
+                  <strong>{{ entry.object.query_text }}</strong>
+                </a>
+                <div class="mt-3 row">
+                  {{ status_badge(entry.object.resolution_state) }}
+                  {% if entry.object.simbad_main_id %}<span class="mono text-secondary text-sm">{{ entry.object.simbad_main_id }}</span>{% endif %}
+                </div>
+              </div>
+              <form class="unfavorite" action="/object/{{ entry.object.simbad_main_id | urlencode }}/unfavorite" method="post">
+                <button type="submit" class="link-button">Remove from saved</button>
+              </form>
+            </div>
+            {% set summary_text = entry.personal_summary or entry.object.ai_summary %}
+            {% if summary_text %}
+              <div class="ai-panel mt-3">
+                <div class="ai-summary-content">{{ summary_text | render_summary_markdown }}</div>
+                <p class="ai-panel__disclaimer mb-0 mt-3">
+                  {% if entry.used_fallback_summary %}
+                    Showing the shared summary — you haven't generated your own for this object.
+                  {% else %}
+                    Showing your personal summary from when you generated it.
+                  {% endif %}
+                </p>
+              </div>
+            {% else %}
+              <p class="text-sm text-tertiary mt-3 mb-0">No summary generated yet.</p>
+            {% endif %}
+          </div>
+        {% endfor %}
+      </div>
     {% else %}
-      <p>You haven't saved any objects yet.</p>
+      <div class="empty-state">You haven't saved any objects yet.</div>
     {% endif %}
-    <p><a href="/">Back to search</a></p>
   </div>
-</body>
-</html>
+{% endblock %}
