@@ -715,3 +715,113 @@ hr { border: none; border-top: 1px solid var(--color-border-muted); margin: var(
   .object-header { flex-direction: column; }
   .kv-grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
 }
+
+/* ---------------------------------------------------------------------- */
+/* Coordinate visualisation side panel                                    */
+/* ---------------------------------------------------------------------- */
+/* The panel and its toggle tab are position:fixed (they live outside the
+   normal document flow), but the *main workspace* genuinely contracts:
+   .page and .site-footer share max-width with --viz-panel-w subtracted,
+   so opening the panel reflows the centered column rather than just
+   overlaying it. On narrow viewports there's no spare margin to give up,
+   so the panel instead becomes a full-width overlay (see media query). */
+
+:root {
+  --viz-panel-w: 0px;
+}
+
+body.has-viz-panel .page,
+body.has-viz-panel .site-footer {
+  max-width: calc(1040px - var(--viz-panel-w));
+  transition: max-width 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+body.viz-open {
+  --viz-panel-w: 420px;
+}
+
+.viz-toggle {
+  position: fixed;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  background: var(--color-accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-md) 0 0 var(--radius-md);
+  padding: var(--space-3);
+  cursor: pointer;
+  font-size: 0.8125rem;
+  font-family: var(--font-sans);
+  box-shadow: -2px 2px 12px rgba(0, 0, 0, 0.3);
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  transition: right 0.28s cubic-bezier(0.4, 0, 0.2, 1), background 0.15s;
+}
+.viz-toggle:hover {
+  background: var(--color-accent-strong);
+}
+.viz-toggle__arrow {
+  display: inline-block;
+  writing-mode: horizontal-tb;
+  transition: transform 0.2s ease;
+}
+body.viz-open .viz-toggle__arrow {
+  transform: rotate(180deg);
+}
+body.viz-open .viz-toggle {
+  right: 420px;
+}
+
+.viz-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 420px;
+  max-width: 100vw;
+  background: #0b1220;
+  border-left: 1px solid var(--color-border);
+  box-shadow: -8px 0 28px rgba(0, 0, 0, 0.4);
+  transform: translateX(100%);
+  transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+  z-index: 39;
+}
+body.viz-open .viz-panel {
+  transform: translateX(0);
+}
+
+.viz-panel__inner {
+  height: 100%;
+}
+
+.viz-panel__placeholder {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.5);
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  padding: var(--space-5);
+  text-align: center;
+}
+
+@media (max-width: 900px) {
+  /* Not enough spare margin around .page to "contract" -- panel becomes a
+     full overlay instead of pushing content. */
+  body.has-viz-panel .page,
+  body.has-viz-panel .site-footer {
+    max-width: 1040px;
+  }
+  .viz-panel {
+    width: 100vw;
+  }
+  body.viz-open .viz-toggle {
+    right: 100vw;
+  }
+}

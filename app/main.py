@@ -1,9 +1,11 @@
 """FastAPI application entry point and route definitions."""
 
+import json
 import logging
 import os
 import secrets
 from contextlib import asynccontextmanager
+from markupsafe import Markup
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, Form, Request
@@ -76,9 +78,18 @@ app.add_middleware(SessionMiddleware, secret_key=_session_secret_key)
 # frontend build step in this project) at /static.
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
+def _tojson(value) -> Markup:
+    """Render a Python value as a JSON literal safe to inline into a <script>
+    block. Plain Jinja2 (unlike Flask's) doesn't ship a `tojson` filter, and
+    result.html needs one to pass ra_deg/dec_deg/name into the coordinate
+    visualiser without hand-rolling JS-string escaping."""
+    return Markup(json.dumps(value).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
+
+
 # Load HTML templates from the templates directory so each route can render pages.
 env = Environment(loader=FileSystemLoader("app/templates"))
 env.filters["render_summary_markdown"] = render_summary_markdown
+env.filters["tojson"] = _tojson
 
 
 @app.get("/", response_class=HTMLResponse)

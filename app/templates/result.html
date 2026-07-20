@@ -212,6 +212,17 @@
     <div class="card"><p class="mb-0">No object found.</p></div>
   {% endif %}
   <p class="text-sm"><a href="/">&larr; Back to search</a></p>
+
+  {% if object and object.ra_deg is not none and object.dec_deg is not none %}
+    <button type="button" id="viz-toggle" class="viz-toggle" aria-expanded="false" aria-controls="viz-panel">
+      <span class="viz-toggle__arrow">&rarr;</span> Click to see coordinate visualisation
+    </button>
+    <aside id="viz-panel" class="viz-panel" aria-hidden="true">
+      <div class="viz-panel__inner" id="viz-panel-inner">
+        <div class="viz-panel__placeholder">Loading visualisation&hellip;</div>
+      </div>
+    </aside>
+  {% endif %}
 {% endblock %}
 
 {% block extra_body %}
@@ -355,6 +366,67 @@
             });
         });
       }
+    })();
+  </script>
+
+  <script>
+    // Coordinate-visualisation side panel. Deliberately its own IIFE, not
+    // nested inside the AI-summary script above: that one returns early
+    // when there's no #ai-summary-panel, which shouldn't take this panel
+    // down with it. The toggle flips layout classes synchronously (so the
+    // slide-in/contract feels instant); three.js and the scene itself are
+    // only fetched on first click, so a slow or failed CDN load never
+    // affects anything else on the page.
+    (function () {
+      var vizToggle = document.getElementById('viz-toggle');
+      if (!vizToggle) return;
+
+      var vizPanel = document.getElementById('viz-panel');
+      var vizInner = document.getElementById('viz-panel-inner');
+      var vizLoaded = false;
+      var vizScriptPromise = null;
+
+      function loadVizScript() {
+        if (window.CelestialViz) return Promise.resolve();
+        if (vizScriptPromise) return vizScriptPromise;
+        vizScriptPromise = new Promise(function (resolve, reject) {
+          var s = document.createElement('script');
+          s.src = '/static/js/celestial-viz.js';
+          s.onload = resolve;
+          s.onerror = function () {
+            vizScriptPromise = null;
+            reject(new Error('Failed to load celestial-viz.js'));
+          };
+          document.body.appendChild(s);
+        });
+        return vizScriptPromise;
+      }
+
+      vizToggle.addEventListener('click', function () {
+        var open = !document.body.classList.contains('viz-open');
+        document.body.classList.add('has-viz-panel');
+        document.body.classList.toggle('viz-open', open);
+        vizToggle.setAttribute('aria-expanded', String(open));
+        vizPanel.setAttribute('aria-hidden', String(!open));
+
+        if (open && !vizLoaded) {
+          vizLoaded = true;
+          loadVizScript()
+            .then(function () {
+              return window.CelestialViz.mount(vizInner, {
+                name: {{ (object.simbad_main_id or object.query_text) | tojson }},
+                ra: {{ object.ra_deg | tojson }},
+                dec: {{ object.dec_deg | tojson }},
+                note: {{ (object.spectral_type or '') | tojson }}
+              });
+            })
+            .catch(function () {
+              vizLoaded = false;
+              vizInner.innerHTML =
+                '<div class="viz-panel__placeholder">Couldn\u2019t load the visualisation. Check your connection and try reopening the panel.</div>';
+            });
+        }
+      });
     })();
   </script>
 {% endblock %}
