@@ -217,6 +217,7 @@
     <button type="button" id="viz-toggle" class="viz-toggle" aria-expanded="false" aria-controls="viz-panel">
       <span class="viz-toggle__arrow">&rarr;</span> Click to see coordinate visualisation
     </button>
+    <button type="button" id="viz-resizer" class="viz-resizer" aria-hidden="true" tabindex="-1"></button>
     <aside id="viz-panel" class="viz-panel" aria-hidden="true">
       <div class="viz-panel__inner" id="viz-panel-inner">
         <div class="viz-panel__placeholder">Loading visualisation&hellip;</div>
@@ -383,8 +384,91 @@
 
       var vizPanel = document.getElementById('viz-panel');
       var vizInner = document.getElementById('viz-panel-inner');
+      var vizResizer = document.getElementById('viz-resizer');
       var vizLoaded = false;
       var vizScriptPromise = null;
+
+      // --- Resizable panel width -------------------------------------
+      var WIDTH_STORAGE_KEY = 'crossmatcher.vizPanelWidth';
+      var MIN_PANEL_W = 280;       // matches the min-width sliders/coordinate
+                                    // data need before the layout breaks.
+      var MAIN_MIN_W = 400;        // must match .page's CSS min-width.
+      var COLLAPSE_THRESHOLD = 100;
+      var DEFAULT_PANEL_W = 420;
+
+      function maxPanelWidth() {
+        return Math.max(
+          MIN_PANEL_W,
+          Math.min(window.innerWidth * 0.6, window.innerWidth - MAIN_MIN_W)
+        );
+      }
+
+      function clampPanelWidth(px) {
+        var max = maxPanelWidth();
+        return Math.min(Math.max(px, MIN_PANEL_W), max);
+      }
+
+      function applyPanelWidth(px) {
+        document.body.style.setProperty('--viz-panel-w', px + 'px');
+      }
+
+      function savedPanelWidth() {
+        var stored = parseFloat(localStorage.getItem(WIDTH_STORAGE_KEY));
+        return isNaN(stored) ? DEFAULT_PANEL_W : stored;
+      }
+
+      var dragState = null;
+
+      function onPointerMove(e) {
+        if (!dragState) return;
+        var raw = window.innerWidth - e.clientX;
+        if (raw < COLLAPSE_THRESHOLD) {
+          // Snap-preview: let it shrink toward zero so the drag feels
+          // continuous right up to the point it disappears.
+          dragState.pendingCollapse = true;
+          applyPanelWidth(Math.max(raw, 0));
+        } else {
+          dragState.pendingCollapse = false;
+          applyPanelWidth(clampPanelWidth(raw));
+        }
+      }
+
+      function onPointerUp(e) {
+        if (!dragState) return;
+        var pendingCollapse = dragState.pendingCollapse;
+        try { vizResizer.releasePointerCapture(dragState.pointerId); } catch (err) {}
+        window.removeEventListener('pointermove', onPointerMove);
+        window.removeEventListener('pointerup', onPointerUp);
+        document.body.classList.remove('viz-dragging');
+        dragState = null;
+
+        if (pendingCollapse) {
+          closeVizPanel();
+          applyPanelWidth(DEFAULT_PANEL_W);
+        } else {
+          var finalWidth = clampPanelWidth(window.innerWidth - e.clientX);
+          applyPanelWidth(finalWidth);
+          localStorage.setItem(WIDTH_STORAGE_KEY, String(finalWidth));
+        }
+      }
+
+      if (vizResizer) {
+        vizResizer.addEventListener('pointerdown', function (e) {
+          if (!document.body.classList.contains('viz-open')) return;
+          e.preventDefault();
+          dragState = { pointerId: e.pointerId, pendingCollapse: false };
+          try { vizResizer.setPointerCapture(e.pointerId); } catch (err) {}
+          document.body.classList.add('viz-dragging');
+          window.addEventListener('pointermove', onPointerMove);
+          window.addEventListener('pointerup', onPointerUp);
+        });
+      }
+
+      function closeVizPanel() {
+        document.body.classList.remove('viz-open');
+        vizToggle.setAttribute('aria-expanded', 'false');
+        vizPanel.setAttribute('aria-hidden', 'true');
+      }
 
       function loadVizScript() {
         if (window.CelestialViz) return Promise.resolve();
@@ -405,9 +489,15 @@
       vizToggle.addEventListener('click', function () {
         var open = !document.body.classList.contains('viz-open');
         document.body.classList.add('has-viz-panel');
-        document.body.classList.toggle('viz-open', open);
-        vizToggle.setAttribute('aria-expanded', String(open));
-        vizPanel.setAttribute('aria-hidden', String(!open));
+
+        if (open) {
+          applyPanelWidth(clampPanelWidth(savedPanelWidth()));
+          document.body.classList.add('viz-open');
+          vizToggle.setAttribute('aria-expanded', 'true');
+          vizPanel.setAttribute('aria-hidden', 'false');
+        } else {
+          closeVizPanel();
+        }
 
         if (open && !vizLoaded) {
           vizLoaded = true;

@@ -186,7 +186,9 @@ hr { border: none; border-top: 1px solid var(--color-border-muted); margin: var(
 
 .page {
   max-width: 1040px;
-  margin: 0 auto;
+  min-width: 400px;
+  margin-left: auto;
+  margin-right: auto;
   padding: var(--space-6) var(--space-5) var(--space-7);
 }
 
@@ -194,7 +196,8 @@ hr { border: none; border-top: 1px solid var(--color-border-muted); margin: var(
 
 .site-footer {
   max-width: 1040px;
-  margin: 0 auto;
+  margin-left: auto;
+  margin-right: auto;
   padding: 0 var(--space-5) var(--space-6);
   /* Sits directly on the dark space-bg scrim now rather than a flat light
      canvas, so this needs to be light rather than var(--color-text-tertiary). */
@@ -722,22 +725,37 @@ hr { border: none; border-top: 1px solid var(--color-border-muted); margin: var(
 /* The panel and its toggle tab are position:fixed (they live outside the
    normal document flow), but the *main workspace* genuinely contracts:
    .page and .site-footer share max-width with --viz-panel-w subtracted,
-   so opening the panel reflows the centered column rather than just
-   overlaying it. On narrow viewports there's no spare margin to give up,
-   so the panel instead becomes a full-width overlay (see media query). */
+   so opening the panel reflows the column rather than just overlaying it.
+   Crucially, the column is *left-anchored*, not re-centred: margin-left is
+   pinned to the offset the column would have at its full 1040px width, so
+   opening/resizing the panel only ever moves the right edge and the user's
+   visual anchor point on the left never shifts. On narrow viewports there's
+   no spare margin to give up, so the panel instead becomes a full-width
+   overlay (see media query). --viz-panel-w is also what the JS resizer
+   drags live, so the panel width and the content gutter always agree. */
 
 :root {
   --viz-panel-w: 0px;
+  --viz-panel-w-default: 420px;
 }
 
 body.has-viz-panel .page,
 body.has-viz-panel .site-footer {
   max-width: calc(1040px - var(--viz-panel-w));
+  margin-left: max(var(--space-5), calc((100vw - 1040px) / 2));
+  margin-right: 0;
   transition: max-width 0.28s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+body.viz-dragging.has-viz-panel .page,
+body.viz-dragging.has-viz-panel .site-footer {
+  /* No easing lag while actively dragging -- the gutter must track the
+     pointer 1:1 or the resizer feels disconnected from the panel edge. */
+  transition: none;
+}
+
 body.viz-open {
-  --viz-panel-w: 420px;
+  --viz-panel-w: var(--viz-panel-w-default);
 }
 
 .viz-toggle {
@@ -774,7 +792,10 @@ body.viz-open .viz-toggle__arrow {
   transform: rotate(180deg);
 }
 body.viz-open .viz-toggle {
-  right: 420px;
+  right: var(--viz-panel-w);
+}
+body.viz-dragging .viz-toggle {
+  transition: background 0.15s;
 }
 
 .viz-panel {
@@ -782,7 +803,7 @@ body.viz-open .viz-toggle {
   top: 0;
   right: 0;
   bottom: 0;
-  width: 420px;
+  width: var(--viz-panel-w-default);
   max-width: 100vw;
   background: #0b1220;
   border-left: 1px solid var(--color-border);
@@ -792,7 +813,11 @@ body.viz-open .viz-toggle {
   z-index: 39;
 }
 body.viz-open .viz-panel {
+  width: var(--viz-panel-w);
   transform: translateX(0);
+}
+body.viz-dragging .viz-panel {
+  transition: none;
 }
 
 .viz-panel__inner {
@@ -811,17 +836,76 @@ body.viz-open .viz-panel {
   text-align: center;
 }
 
+/* Draggable resizer handle, riding the panel's left border. A wide
+   invisible hit-area (14px) sits over a slim visible rule (2px) so it's
+   comfortably grabbable without looking heavy. */
+.viz-resizer {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  right: var(--viz-panel-w);
+  width: 14px;
+  margin-right: -7px;
+  z-index: 41;
+  cursor: col-resize;
+  touch-action: none;
+  background: transparent;
+  display: none;
+  border: none;
+  padding: 0;
+}
+.viz-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: var(--color-border);
+  transition: background 0.15s;
+}
+.viz-resizer:hover::after,
+body.viz-dragging .viz-resizer::after {
+  background: var(--color-accent);
+}
+body.viz-open .viz-resizer {
+  display: block;
+}
+body.viz-dragging .viz-resizer {
+  transition: none;
+}
+
+/* While dragging, kill pointer events and text selection on everything
+   inside the panel (canvas, sliders, dropdowns) so the drag can't be
+   hijacked mid-move and no frames are dropped to hit-testing interactive
+   children underneath the cursor. */
+body.viz-dragging {
+  cursor: col-resize;
+  user-select: none;
+}
+body.viz-dragging .viz-panel__inner {
+  pointer-events: none;
+  user-select: none;
+}
+
 @media (max-width: 900px) {
   /* Not enough spare margin around .page to "contract" -- panel becomes a
      full overlay instead of pushing content. */
   body.has-viz-panel .page,
   body.has-viz-panel .site-footer {
     max-width: 1040px;
+    margin-left: auto;
+    margin-right: auto;
   }
   .viz-panel {
     width: 100vw;
   }
   body.viz-open .viz-toggle {
     right: 100vw;
+  }
+  /* Resizing a full-screen overlay panel makes no sense on mobile. */
+  .viz-resizer {
+    display: none !important;
   }
 }
