@@ -40,8 +40,8 @@ from app.cache import (
 )
 from app.database import init_db
 from app.models import User
-from app.narrative import render_summary_markdown
-from app.ratelimit import RateLimitExceededError, check_and_record
+from app.narrative import GeminiGenerationError, GeminiRateLimitedError, render_summary_markdown
+from app.ratelimit import RateLimitExceededError, check_limit, record_usage
 
 # Configure root logging so app.* loggers propagate under uvicorn.
 logging.basicConfig(
@@ -141,6 +141,28 @@ async def object_profile(
     return HTMLResponse(content=html)
 
 
+def _gemini_error_response(exc: GeminiGenerationError) -> JSONResponse:
+    """Build the JSON body/status for a failed Gemini generation attempt.
+
+    Deliberately uses 503 (Service Unavailable), not 429, even for
+    GeminiRateLimitedError: our own app-level throttling (check_limit's
+    RateLimitExceededError) and the per-object regenerate cooldown
+    (CooldownActiveError) both already use 429 with a {retry_after_seconds} body,
+    and the frontend's existing cooldown countdown UI keys off that status code.
+    Reusing 429 for "Gemini's servers are overloaded" would make the frontend
+    (incorrectly) start that same client-side countdown for a failure that isn't
+    actually a countdown-able cooldown on the user's own actions. 503 keeps the
+    two failure classes visually and programmatically distinct while still being
+    a standard "transient, safe to retry" status.
+    """
+    body: dict[str, object] = {"error": "ai_generation_failed", "message": exc.user_message}
+    if isinstance(exc, GeminiRateLimitedError):
+        body["error"] = "ai_rate_limited"
+    if exc.retry_after_seconds:
+        body["retry_after_seconds"] = exc.retry_after_seconds
+    return JSONResponse(body, status_code=503)
+
+
 @app.get("/object/{simbad_main_id}/summary")
 async def object_summary(
     request: Request, simbad_main_id: str, current_user: User | None = Depends(get_current_user)
@@ -149,7 +171,7 @@ async def object_summary(
     subject_type = "user" if current_user is not None else "session"
     subject_id = str(current_user.id) if current_user is not None else get_session_id(request)
     try:
-        await check_and_record(subject_type, subject_id)
+        await check_limit(subject_type, subject_id)
     except RateLimitExceededError as exc:
         response = JSONResponse(
             {"error": "Rate limit exceeded", "retry_after_seconds": exc.retry_after_seconds},
@@ -162,6 +184,16 @@ async def object_summary(
         summary = await ensure_ai_summary(simbad_main_id)
     except LookupError:
         return JSONResponse({"error": "Object not found"}, status_code=404)
+    except GeminiGenerationError as exc:
+        # Attempt failed -- don't record rate-limit usage for it (nothing was
+        # actually generated) so the client isn't penalised for a server-side
+        # failure that wasn't their fault.
+        logger.error("AI summary generation failed for %s: %s", simbad_main_id, exc)
+        return _gemini_error_response(exc)
+
+    # Only charge the per-client Gemini-quota-spending allowance once generation
+    # has actually succeeded (see app.ratelimit.record_usage's docstring).
+    await record_usage(subject_type, subject_id)
 
     if current_user is not None:
         object_id = await get_object_id_by_simbad_id(simbad_main_id)
@@ -179,7 +211,7 @@ async def object_summary_regenerate(
     subject_type = "user" if current_user is not None else "session"
     subject_id = str(current_user.id) if current_user is not None else get_session_id(request)
     try:
-        await check_and_record(subject_type, subject_id)
+        await check_limit(subject_type, subject_id)
     except RateLimitExceededError as exc:
         response = JSONResponse(
             {"error": "Rate limit exceeded", "retry_after_seconds": exc.retry_after_seconds},
@@ -199,6 +231,18 @@ async def object_summary_regenerate(
         )
         response.headers["Retry-After"] = str(exc.retry_after_seconds)
         return response
+    except GeminiGenerationError as exc:
+        # regenerate_ai_summary() only writes ai_summary_generated_at (the
+        # cooldown clock) after generate_summary() returns successfully, so a
+        # failure here has already left that timestamp untouched -- the user is
+        # free to try again immediately rather than being stuck in a 5-minute
+        # cooldown for an attempt that never produced a summary. Likewise, skip
+        # record_usage() below so the failed attempt doesn't consume their
+        # per-client Gemini-quota-spending allowance either.
+        logger.error("AI summary regeneration failed for %s: %s", simbad_main_id, exc)
+        return _gemini_error_response(exc)
+
+    await record_usage(subject_type, subject_id)
 
     if current_user is not None:
         object_id = await get_object_id_by_simbad_id(simbad_main_id)

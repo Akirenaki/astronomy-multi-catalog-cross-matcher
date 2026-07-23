@@ -240,6 +240,14 @@
       var statusEl = document.getElementById('regenerate-status');
       var cooldownTimer = null;
 
+      // Distinguishes "Gemini failed and gave us a real message to show" from
+      // generic network/parse errors, so the catch handlers below know whether
+      // err.message is safe/meaningful to render directly to the user.
+      function GenerationError(message) {
+        this.message = message;
+      }
+      GenerationError.prototype = Object.create(Error.prototype);
+
       // Purely cosmetic countdown -- the real cooldown is enforced server-side in
       // regenerate_ai_summary() (app/cache.py). If this timer drifts, gets reset by
       // a page reload, or is skipped entirely by calling the endpoint directly, the
@@ -272,16 +280,31 @@
       function wireRegenerateButton(button, statusElement) {
         button.addEventListener('click', function () {
           button.disabled = true;
-          if (statusElement) statusElement.textContent = 'Regenerating…';
+          if (statusElement) {
+            statusElement.classList.remove('ai-summary-status--error');
+            statusElement.textContent = 'Regenerating…';
+          }
           fetch('/object/' + encodeURIComponent(simbadId) + '/summary/regenerate', { method: 'POST' })
             .then(function (response) {
               if (response.status === 429) {
+                // Our own throttling: either the per-object 5-minute cooldown or
+                // the per-client Gemini-quota limit. Both share the same
+                // {retry_after_seconds} body shape, so the same countdown UI
+                // handles either -- see startCooldown's comment above.
                 return response.json().then(function (data) {
                   var retryAfter = (data && data.retry_after_seconds)
                     || parseInt(response.headers.get('Retry-After'), 10)
                     || 0;
                   startCooldown(button, statusElement, retryAfter);
                   throw new Error('cooldown-handled');
+                });
+              }
+              if (response.status === 503) {
+                // Gemini itself failed or is overloaded. This is NOT a cooldown --
+                // the server deliberately did not start one for a failed attempt --
+                // so just surface the real message and let the user retry right away.
+                return response.json().then(function (data) {
+                  throw new GenerationError((data && data.message) || 'Could not regenerate the summary. Try again shortly.');
                 });
               }
               if (!response.ok) throw new Error('Request failed: ' + response.status);
@@ -294,8 +317,13 @@
             })
             .catch(function (err) {
               if (err && err.message === 'cooldown-handled') return;
-              if (statusElement) statusElement.textContent = 'Could not regenerate the summary. Try again shortly.';
               button.disabled = false;
+              if (statusElement) {
+                statusElement.classList.add('ai-summary-status--error');
+                statusElement.textContent = err instanceof GenerationError
+                  ? err.message
+                  : 'Could not regenerate the summary. Try again shortly.';
+              }
             });
         });
       }
@@ -317,11 +345,21 @@
           fetch('/object/' + encodeURIComponent(simbadId) + '/summary')
             .then(function (response) {
               if (response.status === 429) {
+                // Our own per-client throttling -- the user has to actually wait.
                 return response.json().then(function (data) {
                   var retryAfter = (data && data.retry_after_seconds)
                     || parseInt(response.headers.get('Retry-After'), 10)
                     || 0;
                   throw new Error('rate-limited:' + retryAfter);
+                });
+              }
+              if (response.status === 503) {
+                // Gemini itself failed. Nothing was charged against the user's
+                // quota and no cooldown was started server-side, so this should
+                // read as "that attempt failed, try again" rather than "you are
+                // being throttled" -- and the button re-enables immediately.
+                return response.json().then(function (data) {
+                  throw new GenerationError((data && data.message) || 'Could not load the AI summary. Try again.');
                 });
               }
               if (!response.ok) throw new Error('Request failed: ' + response.status);
@@ -350,6 +388,16 @@
               textEl.classList.remove('ai-summary-loading');
               textEl.style.display = 'none';
               generateBtn.style.display = '';
+
+              if (err instanceof GenerationError) {
+                generateBtn.disabled = false;
+                generateBtn.textContent = 'Generate AI summary';
+                textEl.style.display = '';
+                textEl.classList.add('ai-summary-status--error');
+                textEl.textContent = err.message;
+                return;
+              }
+
               if (err && err.message && err.message.indexOf('rate-limited:') === 0) {
                 var seconds = parseInt(err.message.split(':')[1], 10) || 0;
                 generateBtn.disabled = true;

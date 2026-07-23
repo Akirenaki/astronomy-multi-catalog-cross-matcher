@@ -104,6 +104,36 @@ def _init_client() -> Any | None:
 client: Any | None = None
 
 
+class GeminiGenerationError(Exception):
+    """Raised when a Gemini summary-generation attempt fails outright (SDK/API
+    error, unexpected exception, etc).
+
+    Previously generate_summary() swallowed every failure and returned a plain
+    string such as "No summary available" indistinguishable, to any caller,
+    from a summary Gemini genuinely produced. That made two things impossible:
+    surfacing the real failure reason to the user/logs with any precision, and
+    letting callers avoid treating a failed attempt as a
+    successful one. Callers (app.cache, app.main) must catch this and must NOT:
+    persist it as record.ai_summary, start the per-object regenerate cooldown,
+    or record a rate_limit_events row for the attempt.
+    """
+
+    def __init__(self, user_message: str, *, retry_after_seconds: int | None = None) -> None:
+        self.user_message = user_message
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(user_message)
+
+
+class GeminiRateLimitedError(GeminiGenerationError):
+    """Raised specifically when Gemini itself reports a rate-limit/quota failure
+    (HTTP 429 / RESOURCE_EXHAUSTED / RPM-TPM-RPD budget), as opposed to a generic
+    4xx/5xx or SDK-level failure. Kept distinct from GeminiGenerationError so a
+    caller that wants to react differently (e.g. a clearer "the AI service is
+    busy" message) can catch it first; anything not caught as this still matches
+    the parent class.
+    """
+
+
 def _is_rate_limit_or_quota_error(error: Exception) -> bool:
     """Best-effort detection for Gemini rate-limit and quota exhaustion failures."""
     code = getattr(error, "code", None)
@@ -151,7 +181,16 @@ load_environment()
 
 
 async def generate_summary(payload: dict[str, Any]) -> str:
-    """Generate a plain-English summary of an astronomical object."""
+    """Generate a plain-English summary of an astronomical object.
+
+    Raises GeminiRateLimitedError or GeminiGenerationError (see above) instead of
+    returning a placeholder string when the call fails, so callers can tell a
+    genuine Gemini response apart from a failed attempt and react accordingly
+    (skip persisting it, skip starting cooldowns, skip charging rate-limit quota).
+    A missing/unconfigured API key is deliberately NOT treated as a failure here:
+    it's a static deployment state rather than a per-request failure, so it still
+    returns the placeholder string as before.
+    """
     if not client:
         logger.warning(
             "GEMINI_API_KEY is not set -- skipping narrative generation. "
@@ -173,11 +212,19 @@ async def generate_summary(payload: dict[str, Any]) -> str:
                 "Technical details: %s",
                 e,
             )
-            return "Rate limit exceeded. Please wait a moment before trying again."
+            raise GeminiRateLimitedError(
+                "The AI summary service is receiving too many requests right now. "
+                "Please wait a moment and try again.",
+            ) from e
 
         # Catch remaining Gemini API errors (4xx/5xx and other SDK failures)
         logger.error("Gemini API error occurred: %s", e)
-        return "No summary available."
+        raise GeminiGenerationError(
+            "The AI summary service returned an error. Please try again in a moment.",
+        ) from e
     except Exception as e:
         logger.exception("Unexpected failure while generating summary: %s", e)
-        return "No summary available."
+        raise GeminiGenerationError(
+            "The AI summary could not be generated due to an unexpected error. "
+            "Please try again in a moment.",
+        ) from e
