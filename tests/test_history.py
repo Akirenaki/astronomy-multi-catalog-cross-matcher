@@ -20,6 +20,8 @@ from app.database import engine, init_db
 from app.main import app
 from app.models import Base
 
+from conftest import get_csrf_token
+
 
 @pytest_asyncio.fixture(autouse=True)
 async def _init_db():
@@ -62,7 +64,10 @@ def test_history_is_identical_regardless_of_login_state(monkeypatch):
 
     with TestClient(app) as anon_client, TestClient(app) as logged_in_client:
         anon_response = anon_client.get("/history")
-        logged_in_client.post("/register", data={"email": "wolfie@example.com", "password": "hunter2"})
+        csrf_token = get_csrf_token(logged_in_client)
+        logged_in_client.post(
+            "/register", data={"email": "wolfie@example.com", "password": "hunter22", "csrf_token": csrf_token}
+        )
         logged_in_response = logged_in_client.get("/history")
 
     assert 'href="/object/51%20Peg"' in anon_response.text
@@ -75,7 +80,10 @@ def test_history_links_to_saved_objects_when_logged_in(monkeypatch):
     monkeypatch.setattr("app.main.list_recent_objects", lambda limit=10: [])
 
     with TestClient(app) as client:
-        client.post("/register", data={"email": "wolfie@example.com", "password": "hunter2"})
+        csrf_token = get_csrf_token(client)
+        client.post(
+            "/register", data={"email": "wolfie@example.com", "password": "hunter22", "csrf_token": csrf_token}
+        )
         response = client.get("/history")
 
     assert '/account/saved' in response.text

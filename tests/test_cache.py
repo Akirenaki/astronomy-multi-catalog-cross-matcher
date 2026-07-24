@@ -316,3 +316,33 @@ async def test_alias_search_reuses_cached_object_and_preserves_ai_summary(monkey
     assert third.id == first.id
     assert third.ai_summary == "A Sun-like star with one known planet."
     assert simbad_mock.await_count == 2  # unchanged: served from the alias index
+
+
+@pytest.mark.asyncio
+async def test_get_or_resolve_by_simbad_main_id_hits_cache(monkeypatch):
+    """Regression test for EVALUATION.md 1.5: main.py's object_profile() falls back
+    to get_or_resolve(simbad_main_id) whenever a direct get_object_by_simbad_id()
+    lookup misses. Once an object has been resolved at all, looking it up again by
+    its own canonical simbad_main_id (not the original search string) must be a
+    cache hit, not a redundant live re-resolution."""
+    simbad_mock = AsyncMock(
+        return_value={
+            "main_id": "* 51 Peg",
+            "ra": 344.36,
+            "dec": 20.77,
+            "otype": "Star",
+            "sp_type": "G2V",
+            "aliases": ["HD 217014"],
+        }
+    )
+    monkeypatch.setattr("app.resolver.resolve_identity", simbad_mock)
+    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None, False)))
+
+    first = await cache_mod.get_or_resolve("51 Peg")
+    assert simbad_mock.await_count == 1
+
+    # Looking the same object up by its own simbad_main_id (as object_profile()'s
+    # fallback does) must not trigger a second SIMBAD round trip.
+    by_main_id = await cache_mod.get_or_resolve(first.simbad_main_id)
+    assert by_main_id.id == first.id
+    assert simbad_mock.await_count == 1

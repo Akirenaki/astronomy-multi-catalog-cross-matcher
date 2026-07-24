@@ -56,9 +56,15 @@ async def resolve_identity(query_text: str) -> dict | list[dict] | None:
         return None
 
     escaped = normalized.replace("'", "''")
-    # Build an ADQL query that asks SIMBAD for the object metadata and aliases matching the supplied identifier.
+    # Ask for one more row than we intend to show (see the truncation handling
+    # below) so a query matching more than 10 objects can be distinguished from
+    # one matching exactly 10 -- see EVALUATION.md 1.6. Without the +1, a result
+    # that was silently truncated at the display cap looked identical to a
+    # genuinely complete list of 10, with no way to tell the user more matches
+    # exist.
+    _DISPLAY_CAP = 10
     query = (
-        "SELECT TOP 10 basic.main_id, basic.ra, basic.dec, basic.otype, basic.sp_type, ids.ids "
+        f"SELECT TOP {_DISPLAY_CAP + 1} basic.main_id, basic.ra, basic.dec, basic.otype, basic.sp_type, ids.ids "
         "FROM basic JOIN ident ON basic.oid = ident.oidref JOIN ids ON basic.oid = ids.oidref "
         f"WHERE ident.id = '{escaped}'"
     )
@@ -162,4 +168,14 @@ async def resolve_identity(query_text: str) -> dict | list[dict] | None:
 
     if len(candidates) == 1:
         return candidates[0]
+
+    # More than _DISPLAY_CAP objects matched this identifier -- truncate to the cap
+    # for display, but flag every returned candidate as truncated so the UI can
+    # tell the user the list is incomplete rather than silently dropping the rest.
+    # See EVALUATION.md 1.6.
+    if len(candidates) > _DISPLAY_CAP:
+        candidates = candidates[:_DISPLAY_CAP]
+        for candidate in candidates:
+            candidate["candidates_truncated"] = True
+
     return candidates

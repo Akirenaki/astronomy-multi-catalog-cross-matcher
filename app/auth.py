@@ -1,6 +1,8 @@
 """Password hashing and session-based auth helpers."""
 from __future__ import annotations
 
+import secrets
+
 import bcrypt
 from fastapi import Request
 from sqlalchemy import select
@@ -12,6 +14,14 @@ from app.models import User
 # bcrypt truncates/errors past 72 bytes -- cap defensively so a very long pasted
 # password fails predictably in our own validation rather than inside bcrypt.
 _MAX_PASSWORD_BYTES = 72
+
+# README §VII.G/EVALUATION.md suggestion #7: no complexity requirement beyond a
+# floor is imposed. A hard minimum-length check catches the most common weak
+# passwords (empty, "a", "123") without being punitive for a portfolio project;
+# it is deliberately not a "complexity" policy (no forced digits/symbols/case
+# mixing), which research on password strength generally finds pushes people
+# toward predictable substitutions rather than genuinely stronger passwords.
+_MIN_PASSWORD_LENGTH = 8
 
 
 class DuplicateEmailError(Exception):
@@ -26,6 +36,8 @@ def hash_password(password: str) -> str:
     """Hash a plaintext password for storage."""
     if len(password.encode("utf-8")) > _MAX_PASSWORD_BYTES:
         raise ValueError("Password too long")
+    if len(password) < _MIN_PASSWORD_LENGTH:
+        raise ValueError(f"Password must be at least {_MIN_PASSWORD_LENGTH} characters")
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
@@ -118,8 +130,38 @@ def get_session_id(request: Request) -> str:
     """
     session_id = request.session.get("session_id")
     if session_id is None:
-        import secrets
-
         session_id = secrets.token_hex(16)
         request.session["session_id"] = session_id
     return session_id
+
+
+def get_csrf_token(request: Request) -> str:
+    """Return this session's CSRF token, minting one on first use.
+
+    Stored in the signed, itsdangerous-backed session cookie SessionMiddleware
+    already provides, so it can't be forged or read by an attacker who doesn't
+    already have a valid session for this app. This is a standard synchronizer
+    token: a cross-site form or fetch() can make the victim's browser attach
+    their session cookie automatically, but the attacker's page has no way to
+    read this value out of the victim's session to include it in the forged
+    request, so verify_csrf_token() rejects it even though the request carries
+    valid session auth. See EVALUATION.md suggestion #6 -- README §VII.G had
+    flagged this as a known, undefended gap.
+    """
+    token = request.session.get("csrf_token")
+    if token is None:
+        token = secrets.token_urlsafe(32)
+        request.session["csrf_token"] = token
+    return token
+
+
+def verify_csrf_token(request: Request, submitted_token: str | None) -> bool:
+    """Constant-time check of a submitted CSRF token against this session's own.
+
+    False whenever either side is missing -- a session with no token yet (nothing
+    to compare against) is just as invalid as a request with no token attached.
+    """
+    expected = request.session.get("csrf_token")
+    if not expected or not submitted_token:
+        return False
+    return secrets.compare_digest(expected, submitted_token)

@@ -228,7 +228,17 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
         # Point every query string that has ever led to this object -- the ones that
         # matched above, plus the current one -- at this row in the alias index, so
         # future searches for any of them hit the cache directly. See EVALUATION.md 1.4.
-        await _upsert_query_aliases(session, old_query_texts | {resolution_result.query_text}, record.id)
+        # Also alias the object's own canonical SIMBAD ID, normalized the same way
+        # get_cached() normalizes any incoming query string. Without this,
+        # GET /object/{simbad_main_id} (main.py's object_profile()) falling back to
+        # get_or_resolve(simbad_main_id) after a TTL expiry always missed the cache
+        # and re-resolved from SIMBAD, since simbad_main_id is essentially never
+        # itself a string a user actually typed as a search query. See
+        # EVALUATION.md 1.5.
+        alias_query_texts = old_query_texts | {resolution_result.query_text}
+        if resolution_result.main_id:
+            alias_query_texts.add(normalize_query(resolution_result.main_id))
+        await _upsert_query_aliases(session, alias_query_texts, record.id)
 
         commit_started_at = time.perf_counter()
         try:
@@ -483,7 +493,15 @@ async def add_favorite(user_id: int, object_id: int) -> SavedSearch:
 async def remove_favorite(user_id: int, object_id: int) -> bool:
     """Unfavorite an object for a user. Returns True if a row was removed, False if
     it wasn't favorited in the first place (also not an error -- same idempotent
-    reasoning as add_favorite)."""
+    reasoning as add_favorite).
+
+    Unlike add_favorite(), this has no explicit IntegrityError handling -- there's
+    no unique-constraint race to hit on a DELETE. A concurrent double-unfavorite
+    (two requests racing between the SELECT and the DELETE) is still safe: whichever
+    commits second simply issues a DELETE that matches zero rows, which SQLAlchemy
+    treats as a normal no-op here (no version_id_col is configured on SavedSearch,
+    so there's no optimistic-concurrency check to trip). See EVALUATION.md 1.7.
+    """
     async with SessionLocal() as session:
         existing = await session.execute(
             select(SavedSearch).where(SavedSearch.user_id == user_id, SavedSearch.object_id == object_id)

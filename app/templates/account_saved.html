@@ -23,6 +23,7 @@
                 </div>
               </div>
               <form class="unfavorite" action="/object/{{ entry.object.simbad_main_id | urlencode }}/unfavorite" method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
                 <button type="submit" class="link-button">Remove from saved</button>
               </form>
             </div>

@@ -135,3 +135,42 @@ async def test_resolve_identity_raises_lookup_error_on_http_status_error():
     with patch("httpx.AsyncClient", return_value=client):
         with pytest.raises(SimbadLookupError):
             await resolve_identity("51 Peg")
+
+
+@pytest.mark.asyncio
+async def test_resolve_identity_does_not_flag_truncation_at_exactly_ten_candidates():
+    """Exactly at the display cap (10) is a complete list, not a truncated one --
+    must not be flagged."""
+    rows = [[f"Candidate {i}", 10.0 + i, 20.0, "Star", "G2V", ""] for i in range(10)]
+    with patch("httpx.AsyncClient", return_value=_fake_client(_tap_envelope(rows))):
+        candidates = await resolve_identity("Ambiguous Name")
+
+    assert len(candidates) == 10
+    assert all(not c.get("candidates_truncated") for c in candidates)
+
+
+@pytest.mark.asyncio
+async def test_resolve_identity_flags_truncation_above_ten_candidates():
+    """Regression test for EVALUATION.md 1.6: when SIMBAD's TOP 11 query (one more
+    than the display cap) comes back full, more than 10 objects genuinely matched.
+    The result must be truncated to 10 *and* every returned candidate flagged, so
+    the UI can tell the user the list is incomplete instead of silently presenting
+    it as exhaustive."""
+    rows = [[f"Candidate {i}", 10.0 + i, 20.0, "Star", "G2V", ""] for i in range(11)]
+    with patch("httpx.AsyncClient", return_value=_fake_client(_tap_envelope(rows))):
+        candidates = await resolve_identity("Very Ambiguous Name")
+
+    assert len(candidates) == 10
+    assert all(c.get("candidates_truncated") is True for c in candidates)
+
+
+@pytest.mark.asyncio
+async def test_resolve_identity_query_requests_one_more_row_than_the_display_cap():
+    """The ADQL query itself must ask for 11 rows (TOP 10 + 1), not just 10 -- that
+    extra row is what makes truncation detectable at all."""
+    client = _fake_client(_tap_envelope([]))
+    with patch("httpx.AsyncClient", return_value=client):
+        await resolve_identity("51 Peg")
+
+    sent_query = client.post.await_args.kwargs["data"]["query"]
+    assert "TOP 11" in sent_query

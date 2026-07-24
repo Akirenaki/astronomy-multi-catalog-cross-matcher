@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from markupsafe import Markup
 from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, Form, Request
+from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -18,10 +18,12 @@ from app.auth import (
     DuplicateEmailError,
     authenticate,
     create_user,
+    get_csrf_token,
     get_current_user,
     get_session_id,
     log_in_session,
     log_out_session,
+    verify_csrf_token,
 )
 from app.cache import (
     AI_SUMMARY_COOLDOWN,
@@ -97,6 +99,24 @@ def _tojson(value) -> Markup:
 env = Environment(loader=FileSystemLoader("app/templates"), autoescape=select_autoescape(["html"]))
 env.filters["render_summary_markdown"] = render_summary_markdown
 env.filters["tojson"] = _tojson
+env.globals["csrf_token"] = get_csrf_token
+
+
+async def require_csrf_form(request: Request, csrf_token: str = Form(...)) -> None:
+    """FastAPI dependency for form-encoded POST routes: reject the request before
+    it does anything if the submitted csrf_token doesn't match this session's.
+    See EVALUATION.md suggestion #6."""
+    if not verify_csrf_token(request, csrf_token):
+        raise HTTPException(status_code=403, detail="Invalid or missing CSRF token. Please reload the page and try again.")
+
+
+async def require_csrf_header(request: Request) -> None:
+    """FastAPI dependency for JSON/fetch-based POST routes (no form body to carry a
+    csrf_token field): reads the token from the X-CSRF-Token header instead, which
+    result.html's JS sets from the <meta name="csrf-token"> tag in base.html. See
+    EVALUATION.md suggestion #6."""
+    if not verify_csrf_token(request, request.headers.get("x-csrf-token")):
+        raise HTTPException(status_code=403, detail="Invalid or missing CSRF token. Please reload the page and try again.")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -227,7 +247,7 @@ async def object_summary(
     return JSONResponse({"summary": summary, "summary_html": render_summary_markdown(summary)})
 
 
-@app.post("/object/{simbad_main_id}/summary/regenerate")
+@app.post("/object/{simbad_main_id}/summary/regenerate", dependencies=[Depends(require_csrf_header)])
 async def object_summary_regenerate(
     request: Request, simbad_main_id: str, current_user: User | None = Depends(get_current_user)
 ) -> JSONResponse:
@@ -322,7 +342,7 @@ async def register_form(request: Request, next: str | None = None) -> HTMLRespon
     return HTMLResponse(content=html)
 
 
-@app.post("/register", response_class=HTMLResponse, response_model=None)
+@app.post("/register", response_class=HTMLResponse, response_model=None, dependencies=[Depends(require_csrf_form)])
 async def register_submit(
     request: Request, email: str = Form(...), password: str = Form(...), next: str | None = Form(None)
 ) -> HTMLResponse | RedirectResponse:
@@ -357,7 +377,7 @@ async def login_form(request: Request, next: str | None = None) -> HTMLResponse:
     return HTMLResponse(content=html)
 
 
-@app.post("/login", response_class=HTMLResponse, response_model=None)
+@app.post("/login", response_class=HTMLResponse, response_model=None, dependencies=[Depends(require_csrf_form)])
 async def login_submit(
     request: Request, email: str = Form(...), password: str = Form(...), next: str | None = Form(None)
 ) -> HTMLResponse | RedirectResponse:
@@ -372,14 +392,14 @@ async def login_submit(
     return RedirectResponse(url=_safe_next_path(next), status_code=303)
 
 
-@app.post("/logout")
+@app.post("/logout", dependencies=[Depends(require_csrf_form)])
 async def logout(request: Request) -> RedirectResponse:
     """Clear the current session's logged-in state."""
     log_out_session(request)
     return RedirectResponse(url="/", status_code=303)
 
 
-@app.post("/object/{simbad_main_id}/favorite", response_model=None)
+@app.post("/object/{simbad_main_id}/favorite", response_model=None, dependencies=[Depends(require_csrf_form)])
 async def favorite_object(
     request: Request, simbad_main_id: str, current_user: User | None = Depends(get_current_user)
 ) -> RedirectResponse | JSONResponse:
@@ -396,7 +416,7 @@ async def favorite_object(
     return RedirectResponse(url=f"/object/{quote(simbad_main_id, safe='')}", status_code=303)
 
 
-@app.post("/object/{simbad_main_id}/unfavorite", response_model=None)
+@app.post("/object/{simbad_main_id}/unfavorite", response_model=None, dependencies=[Depends(require_csrf_form)])
 async def unfavorite_object(
     request: Request, simbad_main_id: str, current_user: User | None = Depends(get_current_user)
 ) -> RedirectResponse | JSONResponse:

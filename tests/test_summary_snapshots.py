@@ -21,6 +21,8 @@ from app.database import engine, init_db
 from app.main import app
 from app.models import Base, ObjectRecord, UserSummarySnapshot
 
+from conftest import get_csrf_token
+
 
 @pytest_asyncio.fixture(autouse=True)
 async def _init_db():
@@ -55,7 +57,10 @@ def test_generate_as_logged_in_user_creates_snapshot_row(monkeypatch):
     encoded_id = quote("* alf Ori", safe="")
 
     with TestClient(app) as client:
-        client.post("/register", data={"email": "wolfie@example.com", "password": "hunter2"})
+        csrf_token = get_csrf_token(client)
+        client.post(
+            "/register", data={"email": "wolfie@example.com", "password": "hunter22", "csrf_token": csrf_token}
+        )
         client.get("/search?q=Betelgeuse")
         client.get(f"/object/{encoded_id}/summary")
 
@@ -103,10 +108,13 @@ def test_account_saved_shows_personal_snapshot_not_someone_elses_regenerate(monk
     encoded_id = quote("* alf Ori", safe="")
 
     with TestClient(app) as client_a, TestClient(app) as client_b:
-        client_a.post("/register", data={"email": "user-a@example.com", "password": "hunter2"})
+        csrf_token_a = get_csrf_token(client_a)
+        client_a.post(
+            "/register", data={"email": "user-a@example.com", "password": "hunter22", "csrf_token": csrf_token_a}
+        )
         client_a.get("/search?q=Betelgeuse")
         client_a.get(f"/object/{encoded_id}/summary")  # A generates "A's summary"
-        client_a.post(f"/object/{encoded_id}/favorite")
+        client_a.post(f"/object/{encoded_id}/favorite", data={"csrf_token": csrf_token_a})
 
         # Simulate the cooldown having elapsed so B's regenerate isn't blocked by
         # Decision B's per-object cooldown.
@@ -123,8 +131,13 @@ def test_account_saved_shows_personal_snapshot_not_someone_elses_regenerate(monk
 
         asyncio.run(_age_cooldown())
 
-        client_b.post("/register", data={"email": "user-b@example.com", "password": "hunter2"})
-        client_b.post(f"/object/{encoded_id}/summary/regenerate")  # B regenerates -> "B's summary"
+        csrf_token_b = get_csrf_token(client_b)
+        client_b.post(
+            "/register", data={"email": "user-b@example.com", "password": "hunter22", "csrf_token": csrf_token_b}
+        )
+        client_b.post(
+            f"/object/{encoded_id}/summary/regenerate", headers={"X-CSRF-Token": csrf_token_b}
+        )  # B regenerates -> "B's summary"
 
         a_saved_page = client_a.get("/account/saved")
 
@@ -143,11 +156,17 @@ def test_ai_summary_remains_single_global_value_regardless_of_snapshot_count(mon
     encoded_id = quote("* alf Ori", safe="")
 
     with TestClient(app) as client_a, TestClient(app) as client_b, TestClient(app) as client_c:
-        client_a.post("/register", data={"email": "user-a2@example.com", "password": "hunter2"})
+        csrf_token_a = get_csrf_token(client_a)
+        client_a.post(
+            "/register", data={"email": "user-a2@example.com", "password": "hunter22", "csrf_token": csrf_token_a}
+        )
         client_a.get("/search?q=Betelgeuse")
         client_a.get(f"/object/{encoded_id}/summary")  # generates the ONE shared summary
 
-        client_b.post("/register", data={"email": "user-b2@example.com", "password": "hunter2"})
+        csrf_token_b = get_csrf_token(client_b)
+        client_b.post(
+            "/register", data={"email": "user-b2@example.com", "password": "hunter22", "csrf_token": csrf_token_b}
+        )
         client_b.get(f"/object/{encoded_id}/summary")  # cache hit, no new Gemini call
 
         client_c.get(f"/object/{encoded_id}/summary")  # anonymous cache hit
