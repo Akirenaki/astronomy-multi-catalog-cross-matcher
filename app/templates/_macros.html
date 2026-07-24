@@ -39,7 +39,16 @@
 <span class="status-badge status-badge--{{ meta.modifier }}">{{ state_icon(meta.icon) }}{{ meta.label }}</span>
 {%- endmacro %}
 
-{% macro state_banner(state, title, body) %}
+{# state_banner takes its body via {% call %}/caller() rather than a string
+   argument. Callers used to build `body` themselves with `'<p>...' ~
+   object.query_text ~ '...</p>'`, which is exactly the kind of pre-built HTML
+   string that autoescaping can't help with -- by the time it reaches this
+   macro it's just an opaque string, so escaping it here would mangle the
+   deliberate <p> markup along with it, and *not* escaping it is the XSS in
+   EVALUATION.md 1.1. Using caller() instead means the body is written as real
+   template markup at the call site, so literal tags stay literal and any
+   `{{ user_value }}` inside it is escaped normally, same as everywhere else. #}
+{% macro state_banner(state, title) %}
 {%- set meta = state_meta.get(state, {"modifier": "unresolved", "icon": "minus", "label": state}) -%}
 <div class="state-banner state-banner--{{ meta.modifier }}">
   <div class="state-banner__icon">{{ state_icon(meta.icon) }}</div>
@@ -48,7 +57,7 @@
       <span class="status-badge status-badge--{{ meta.modifier }}">{{ state_icon(meta.icon) }}{{ meta.label }}</span>
     </div>
     <h2>{{ title }}</h2>
-    {{ body }}
+    {{ caller() }}
   </div>
 </div>
 {%- endmacro %}

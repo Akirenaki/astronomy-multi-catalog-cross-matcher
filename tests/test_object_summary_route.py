@@ -52,7 +52,7 @@ def test_search_renders_generate_button_without_calling_gemini(monkeypatch):
             }
         ),
     )
-    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None)))
+    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None, False)))
     summary_mock = AsyncMock(return_value="should not be called during /search")
     monkeypatch.setattr("app.cache.generate_summary", summary_mock)
 
@@ -91,7 +91,7 @@ def test_object_summary_route_generates_and_returns_json(monkeypatch):
             }
         ),
     )
-    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None)))
+    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None, False)))
     summary_mock = AsyncMock(return_value="Betelgeuse is a huge red star with no known planets.")
     monkeypatch.setattr("app.cache.generate_summary", summary_mock)
 
@@ -127,7 +127,7 @@ def test_object_summary_route_returns_rendered_markdown(monkeypatch):
             }
         ),
     )
-    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None)))
+    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None, False)))
     monkeypatch.setattr("app.cache.generate_summary", AsyncMock(return_value="Betelgeuse is **bright**."))
 
     with TestClient(app) as client:
@@ -155,7 +155,7 @@ def test_object_profile_renders_regenerate_button_when_summary_exists(monkeypatc
             }
         ),
     )
-    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None)))
+    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None, False)))
     monkeypatch.setattr("app.cache.generate_summary", AsyncMock(return_value="A supergiant star."))
 
     encoded_id = quote("* alf Ori", safe="")
@@ -176,3 +176,49 @@ def test_object_summary_route_returns_404_for_unknown_id():
         response = client.get("/object/this-id-does-not-exist/summary")
 
     assert response.status_code == 404
+
+
+def test_object_summary_cache_hit_does_not_consume_rate_limit_quota(monkeypatch):
+    """Regression test for EVALUATION.md 1.2: re-fetching an already-generated
+    summary must not write a rate_limit_events row, since no Gemini call
+    happens on that path. Set the limit to 1 so a second (unbudgeted) real
+    generation would immediately 429 -- confirming the cache hit truly didn't
+    spend the client's only slot."""
+    from app import ratelimit as ratelimit_mod
+
+    monkeypatch.setattr(ratelimit_mod, "AI_SUMMARY_RATE_LIMIT", 1)
+    monkeypatch.setattr(
+        "app.resolver.resolve_identity",
+        AsyncMock(
+            return_value={
+                "main_id": "* alf Ori",
+                "ra": 88.79,
+                "dec": 7.41,
+                "otype": "Star",
+                "sp_type": "M1-M2Ia-Iab",
+                "aliases": ["Betelgeuse"],
+            }
+        ),
+    )
+    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None, False)))
+    summary_mock = AsyncMock(return_value="A red supergiant.")
+    monkeypatch.setattr("app.cache.generate_summary", summary_mock)
+
+    encoded_id = quote("* alf Ori", safe="")
+    with TestClient(app) as client:
+        client.get("/search?q=Betelgeuse")
+        first = client.get(f"/object/{encoded_id}/summary")  # generates, consumes the only slot
+        assert first.status_code == 200
+        summary_mock.assert_awaited_once()
+
+        # A different object would 429 here (limit is 1 and it's already spent),
+        # but repeated requests for the *same, already-summarized* object must
+        # keep succeeding, because none of them should be charged against the
+        # budget in the first place.
+        for _ in range(3):
+            again = client.get(f"/object/{encoded_id}/summary")
+            assert again.status_code == 200
+            assert again.json()["summary"] == "A red supergiant."
+
+    # Gemini was still only ever called the one time, for the original generation.
+    summary_mock.assert_awaited_once()

@@ -51,7 +51,7 @@ async def _resolve_fixture_star(monkeypatch, main_id="* alf Ori", query="Betelge
             }
         ),
     )
-    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None)))
+    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None, False)))
     return await cache_mod.get_or_resolve(query, generate_ai_summary=False)
 
 
@@ -148,7 +148,7 @@ def test_regenerate_route_returns_429_with_retry_after(monkeypatch):
             }
         ),
     )
-    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None)))
+    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None, False)))
     monkeypatch.setattr("app.cache.generate_summary", AsyncMock(return_value="a summary"))
 
     encoded_id = quote("* alf Ori", safe="")

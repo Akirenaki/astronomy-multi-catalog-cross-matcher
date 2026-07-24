@@ -6,12 +6,19 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from app.database import SessionLocal
-from app.models import ObjectRecord, IdentifierRecord, PlanetRecord, SavedSearch, UserSummarySnapshot
+from app.models import (
+    IdentifierRecord,
+    ObjectRecord,
+    PlanetRecord,
+    QueryAlias,
+    SavedSearch,
+    UserSummarySnapshot,
+)
 from app.narrative import generate_summary
 from app.resolver import ResolutionResult, resolve_query
 from app.catalogs.simbad import normalize_query
@@ -34,23 +41,56 @@ class CooldownActiveError(Exception):
 
 
 async def get_cached(query_text: str) -> ObjectRecord | None:
-    """Return a cached object record when the normalized query is still fresh."""
+    """Return a cached object record when the normalized query is still fresh.
+
+    Checks ObjectRecord.query_text first (the common case: the same search
+    string as last time), then falls back to the QueryAlias index so a
+    *different* string that previously resolved to the same object (e.g. "51
+    Peg" vs "51 Pegasi" vs "HD 217014") is also served from the cache instead
+    of triggering a redundant SIMBAD + Exoplanet Archive round trip. See
+    EVALUATION.md 1.4.
+    """
     normalized_query = normalize_query(query_text)
+    key = normalized_query or query_text
     async with SessionLocal() as session:
+        # Eagerly load these relationships while the session is still open. Both
+        # result.html and ObjectRecord.to_dict() read .identifiers/.planets, but this
+        # session closes as soon as this function returns -- without eager loading here,
+        # touching either attribute afterward raises DetachedInstanceError (the "Internal
+        # Server Error" seen on the /search and /object pages).
+        eager_opts = (selectinload(ObjectRecord.identifiers), selectinload(ObjectRecord.planets))
+
         result = await session.execute(
             select(ObjectRecord)
-            # Eagerly load these relationships while the session is still open. Both
-            # result.html and ObjectRecord.to_dict() read .identifiers/.planets, but this
-            # session closes as soon as this function returns -- without eager loading here,
-            # touching either attribute afterward raises DetachedInstanceError (the "Internal
-            # Server Error" seen on the /search and /object pages).
-            .options(selectinload(ObjectRecord.identifiers), selectinload(ObjectRecord.planets))
-            .where(
-                ObjectRecord.query_text == (normalized_query or query_text),
-                ObjectRecord.expires_at > datetime.now(timezone.utc),
-            )
+            .options(*eager_opts)
+            .where(ObjectRecord.query_text == key, ObjectRecord.expires_at > datetime.now(timezone.utc))
         )
-        return result.scalar_one_or_none()
+        hit = result.scalar_one_or_none()
+        if hit is not None:
+            return hit
+
+        alias_result = await session.execute(
+            select(ObjectRecord)
+            .join(QueryAlias, QueryAlias.object_id == ObjectRecord.id)
+            .options(*eager_opts)
+            .where(QueryAlias.query_text == key, ObjectRecord.expires_at > datetime.now(timezone.utc))
+        )
+        return alias_result.scalar_one_or_none()
+
+
+async def _upsert_query_aliases(session, query_texts: set[str], object_id: int) -> None:
+    """Point every given (non-empty) query string at `object_id` in the alias
+    index, updating in place if a query string was previously aliased to a
+    different (now-superseded) object. See EVALUATION.md 1.4."""
+    for query_text in query_texts:
+        if not query_text:
+            continue
+        existing = await session.execute(select(QueryAlias).where(QueryAlias.query_text == query_text))
+        row = existing.scalar_one_or_none()
+        if row is not None:
+            row.object_id = object_id
+        else:
+            session.add(QueryAlias(query_text=query_text, object_id=object_id))
 
 
 async def store_result(resolution_result: ResolutionResult, *, generate_ai_summary: bool = True) -> ObjectRecord:
@@ -74,10 +114,21 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
             if row is not None and row not in candidate_rows:
                 candidate_rows.append(row)
 
-        # Delete any matching stale rows before inserting the refreshed record.
-        for stale_row in candidate_rows:
+        # Prefer updating an existing row in place over delete-and-reinsert: the old
+        # behavior discarded ai_summary/ai_summary_generated_at (and forced identifiers
+        # and planets to be fully rebuilt) every time a *different* alias for an
+        # already-cached object was searched, even though nothing about the object
+        # itself had changed. See EVALUATION.md 1.4. candidate_rows can only contain
+        # more than one row in the rare case where a query-text match and a
+        # main-id match point at two different (stale/merged) rows; any beyond the
+        # first are genuinely stale and still get deleted outright.
+        primary_row = candidate_rows[0] if candidate_rows else None
+        stale_rows = candidate_rows[1:]
+        old_query_texts = {r.query_text for r in candidate_rows}
+
+        for stale_row in stale_rows:
             await session.delete(stale_row)
-        if candidate_rows:
+        if stale_rows:
             await session.flush()
 
         # Serialize the ambiguous candidate list so it can be restored later without re-querying SIMBAD.
@@ -88,7 +139,7 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
             json.dumps(resolution_result.resolved_via) if resolution_result.resolved_via else None
         )
 
-        record = ObjectRecord(
+        fresh_fields = dict(
             query_text=resolution_result.query_text,
             simbad_main_id=resolution_result.main_id,
             ra_deg=resolution_result.ra,
@@ -96,18 +147,39 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
             otype=resolution_result.otype,
             spectral_type=resolution_result.spectral_type,
             resolution_state=resolution_result.state,
+            planets_lookup_failed=resolution_result.planets_lookup_failed,
             candidates_json=candidates_json,
             resolved_via_json=resolved_via_json,
             resolved_at=datetime.now(timezone.utc),
             expires_at=datetime.now(timezone.utc) + timedelta(days=14),
         )
-        session.add(record)
+
+        if primary_row is not None:
+            record = primary_row
+            for field_name, value in fresh_fields.items():
+                setattr(record, field_name, value)
+            # ai_summary / ai_summary_generated_at are deliberately left untouched here
+            # -- that's the whole point of updating in place rather than
+            # delete-and-reinsert. A previously generated summary survives a
+            # re-resolution (e.g. from a new alias search, or the object's normal TTL
+            # expiring) instead of being silently discarded.
+            await session.execute(delete(IdentifierRecord).where(IdentifierRecord.object_id == record.id))
+            await session.execute(delete(PlanetRecord).where(PlanetRecord.object_id == record.id))
+        else:
+            record = ObjectRecord(**fresh_fields)
+            session.add(record)
         await session.flush()
 
         # Unresolved, ambiguous, and failed-lookup requests should expire quickly so
         # later fixes -- or simply a working network connection -- can be picked up
-        # without waiting out the full 14-day TTL used for confirmed results.
-        if resolution_result.state in ("UNRESOLVED", "AMBIGUOUS", "LOOKUP_FAILED"):
+        # without waiting out the full 14-day TTL used for confirmed results. A
+        # PARTIAL result whose "no planets" conclusion is unconfirmed (the Exoplanet
+        # Archive lookup itself failed, not a genuine zero-match -- see
+        # EVALUATION.md 1.3) gets the same short TTL for the same reason: it must not
+        # be cached as a confident negative for two weeks.
+        if resolution_result.state in ("UNRESOLVED", "AMBIGUOUS", "LOOKUP_FAILED") or (
+            resolution_result.state == "PARTIAL" and resolution_result.planets_lookup_failed
+        ):
             record.expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
 
         # Store each alias reported by SIMBAD as an identifier row.
@@ -135,8 +207,16 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
                 )
             )
 
-        # Skip AI summaries for unresolved, ambiguous, and failed-lookup results.
-        if generate_ai_summary and resolution_result.state not in ("UNRESOLVED", "AMBIGUOUS", "LOOKUP_FAILED"):
+        # Skip AI summaries for unresolved, ambiguous, and failed-lookup results. Only
+        # relevant for the primary_row-is-None (brand new record) path in practice,
+        # since generate_ai_summary=True callers only hit store_result() on a genuine
+        # first-time resolution -- an in-place update already has (and keeps) whatever
+        # ai_summary it had before, per the comment above.
+        if (
+            generate_ai_summary
+            and record.ai_summary is None
+            and resolution_result.state not in ("UNRESOLVED", "AMBIGUOUS", "LOOKUP_FAILED")
+        ):
             summary_payload = {
                 "main_id": resolution_result.main_id,
                 "spectral_type": resolution_result.spectral_type,
@@ -144,6 +224,11 @@ async def store_result(resolution_result: ResolutionResult, *, generate_ai_summa
                 "planets": resolution_result.planets,
             }
             record.ai_summary = await generate_summary(summary_payload)
+
+        # Point every query string that has ever led to this object -- the ones that
+        # matched above, plus the current one -- at this row in the alias index, so
+        # future searches for any of them hit the cache directly. See EVALUATION.md 1.4.
+        await _upsert_query_aliases(session, old_query_texts | {resolution_result.query_text}, record.id)
 
         commit_started_at = time.perf_counter()
         try:
@@ -303,6 +388,28 @@ async def regenerate_ai_summary(simbad_main_id: str) -> str:
         record.ai_summary_generated_at = datetime.now(timezone.utc)
         await session.commit()
         return summary
+
+
+async def get_cached_ai_summary(simbad_main_id: str) -> str | None:
+    """Return an already-generated AI summary for this object, without calling
+    Gemini or touching rate limits either way.
+
+    Used by GET /object/{id}/summary to serve a cache hit *before* check_limit()
+    is even called -- ensure_ai_summary() also has this exact short-circuit
+    internally, but by the time execution reaches it in the route, check_limit()
+    has already run and record_usage() is queued to run unconditionally on
+    success, so a cache hit still spent one of the caller's 20 requests/hour even
+    though no Gemini call happened. See EVALUATION.md 1.2.
+
+    Returns None both when the object doesn't exist yet and when it exists but
+    has no summary generated yet -- callers that need to distinguish those two
+    cases should fall through to ensure_ai_summary(), which does.
+    """
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(ObjectRecord.ai_summary).where(ObjectRecord.simbad_main_id == simbad_main_id)
+        )
+        return result.scalar_one_or_none() or None
 
 
 async def get_object_by_simbad_id(simbad_main_id: str) -> ObjectRecord | None:

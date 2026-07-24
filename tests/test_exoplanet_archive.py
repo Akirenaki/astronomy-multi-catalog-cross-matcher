@@ -60,24 +60,28 @@ async def test_find_planets_parses_realistic_bare_array_response():
         }
     ]
     with patch("httpx.AsyncClient", return_value=_fake_client(payload)):
-        planets, matched_alias = await find_planets(["HD 217014"])
+        planets, matched_alias, lookup_failed = await find_planets(["HD 217014"])
 
     assert matched_alias == "HD 217014"
     assert len(planets) == 1
     assert planets[0]["pl_name"] == "51 Peg b"
     assert planets[0]["orbital_period_days"] == 4.230785
     assert planets[0]["discovery_year"] == 1995
+    assert lookup_failed is False
 
 
 @pytest.mark.asyncio
 async def test_find_planets_returns_empty_for_genuinely_empty_array():
     """A star with no catalogued planets returns a real empty array from the API --
-    confirm that still cleanly produces ([], None), not an exception."""
+    confirm that still cleanly produces ([], None, False): a genuine, confirmed
+    negative, not a failed lookup (see test_find_planets_reports_lookup_failed_when_a_chunk_errors_out
+    below for the failure case this must be distinguishable from)."""
     with patch("httpx.AsyncClient", return_value=_fake_client([])):
-        planets, matched_alias = await find_planets(["Barnard's Star"])
+        planets, matched_alias, lookup_failed = await find_planets(["Barnard's Star"])
 
     assert planets == []
     assert matched_alias is None
+    assert lookup_failed is False
 
 
 @pytest.mark.asyncio
@@ -94,10 +98,11 @@ async def test_find_planets_picks_first_alias_with_matching_rows_in_one_batch():
 
     client = _fake_client(payload)
     with patch("httpx.AsyncClient", return_value=client) as client_ctor:
-        planets, matched_alias = await find_planets(["Alias One", "Alias Two"])
+        planets, matched_alias, lookup_failed = await find_planets(["Alias One", "Alias Two"])
 
     assert matched_alias == "Alias Two"
     assert planets[0]["pl_name"] == "Test b"
+    assert lookup_failed is False
     # The core regression: exactly one HTTP request for both aliases, not one per alias.
     assert client_ctor.call_count == 1
     assert client.post.await_count == 1
@@ -128,9 +133,55 @@ async def test_find_planets_chunks_very_large_alias_lists():
     client = _fake_client([])
 
     with patch("httpx.AsyncClient", return_value=client) as client_ctor:
-        planets, matched_alias = await find_planets(many_aliases)
+        planets, matched_alias, lookup_failed = await find_planets(many_aliases)
 
     assert planets == []
     assert matched_alias is None
+    assert lookup_failed is False
     # _BATCH_SIZE + 5 aliases, batches of _BATCH_SIZE, should be exactly 2 requests.
     assert client_ctor.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_find_planets_reports_lookup_failed_when_a_chunk_errors_out():
+    """Regression test for EVALUATION.md 1.3: when a chunk's request fails outright
+    (here, the mocked client raises), the resulting ([], None) must be flagged as
+    lookup_failed=True rather than indistinguishable from a genuine "no planets"
+    response, so callers don't cache it as a confident negative."""
+    client = AsyncMock()
+    client.__aenter__.return_value = client
+    client.__aexit__.return_value = False
+    client.post = AsyncMock(side_effect=Exception("connection reset"))
+
+    with patch("httpx.AsyncClient", return_value=client):
+        planets, matched_alias, lookup_failed = await find_planets(["HD 217014"])
+
+    assert planets == []
+    assert matched_alias is None
+    assert lookup_failed is True
+
+
+@pytest.mark.asyncio
+async def test_find_planets_lookup_failed_is_false_when_a_later_chunk_finds_a_match():
+    """If an earlier chunk fails but a later chunk still finds a genuine match, that's
+    a confirmed positive -- lookup_failed must be False, since the "no planets"
+    caveat doesn't apply when planets *were* found."""
+    from app.catalogs import exoplanet_archive as module
+
+    failing_client = AsyncMock()
+    failing_client.__aenter__.return_value = failing_client
+    failing_client.__aexit__.return_value = False
+    failing_client.post = AsyncMock(side_effect=Exception("timeout"))
+
+    succeeding_payload = [{"pl_name": "Test b", "pl_letter": "b", "hostname": "Second Chunk Alias 0"}]
+    succeeding_client = _fake_client(succeeding_payload)
+
+    clients = iter([failing_client, succeeding_client])
+    many_aliases = [f"Alias {i}" for i in range(module._BATCH_SIZE)] + ["Second Chunk Alias 0"]
+
+    with patch("httpx.AsyncClient", side_effect=lambda *a, **k: next(clients)):
+        planets, matched_alias, lookup_failed = await find_planets(many_aliases)
+
+    assert matched_alias == "Second Chunk Alias 0"
+    assert len(planets) == 1
+    assert lookup_failed is False

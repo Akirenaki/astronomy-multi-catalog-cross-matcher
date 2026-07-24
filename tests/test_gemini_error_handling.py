@@ -50,7 +50,7 @@ async def _resolve_fixture_star(monkeypatch, main_id="* alf Ori", query="Betelge
             }
         ),
     )
-    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None)))
+    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None, False)))
     return await cache_mod.get_or_resolve(query, generate_ai_summary=False)
 
 
@@ -124,7 +124,7 @@ def test_generate_route_returns_503_with_message_on_gemini_failure(monkeypatch):
                 }
             ),
         )
-        monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None)))
+        monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None, False)))
         client.get("/search?q=Betelgeuse")
 
         monkeypatch.setattr(
@@ -160,7 +160,7 @@ def test_generate_route_does_not_record_rate_limit_usage_on_failure(monkeypatch)
                 }
             ),
         )
-        monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None)))
+        monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None, False)))
         client.get("/search?q=Betelgeuse")
 
         monkeypatch.setattr(

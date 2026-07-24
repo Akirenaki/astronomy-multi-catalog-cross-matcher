@@ -39,7 +39,7 @@ def _mock_betelgeuse(monkeypatch):
             }
         ),
     )
-    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None)))
+    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None, False)))
 
 
 def test_favoriting_as_logged_in_user_creates_saved_search_row(monkeypatch):

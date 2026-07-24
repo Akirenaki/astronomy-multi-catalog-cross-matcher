@@ -47,6 +47,11 @@ class ResolutionResult:
     matched_alias: str | None = None
     candidates: list[dict[str, Any]] = field(default_factory=list)
     resolved_via: list[str] = field(default_factory=list)
+    # True only for a PARTIAL result where the "no planets" conclusion is unconfirmed
+    # because the Exoplanet Archive lookup itself failed (see find_planets' docstring
+    # and EVALUATION.md 1.3) -- always False for RESOLVED, and False for PARTIAL
+    # results that are genuine confirmed negatives.
+    planets_lookup_failed: bool = False
 
 
 async def resolve_query(query_text: str) -> ResolutionResult:
@@ -118,7 +123,9 @@ async def resolve_query(query_text: str) -> ResolutionResult:
 
     # Ask the exoplanet archive for planets only when there is something to check.
     exoplanet_started_at = time.perf_counter()
-    planets, matched_alias = await find_planets(match_candidates) if match_candidates else ([], None)
+    planets, matched_alias, planets_lookup_failed = (
+        await find_planets(match_candidates) if match_candidates else ([], None, False)
+    )
     logger.info(
         "Exoplanet Archive stage: completed in %.3fs (matched_alias=%r)",
         time.perf_counter() - exoplanet_started_at,
@@ -153,4 +160,5 @@ async def resolve_query(query_text: str) -> ResolutionResult:
         planets=planets,
         matched_alias=matched_alias,
         resolved_via=[normalized_query or query_text, simbad_result.get("main_id") or ""],
+        planets_lookup_failed=planets_lookup_failed,
     )

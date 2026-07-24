@@ -11,7 +11,7 @@ from urllib.parse import quote
 from fastapi import Depends, FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from jinja2 import Environment, FileSystemLoader
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.auth import (
@@ -28,6 +28,7 @@ from app.cache import (
     CooldownActiveError,
     add_favorite,
     ensure_ai_summary,
+    get_cached_ai_summary,
     get_object_by_simbad_id,
     get_object_id_by_simbad_id,
     get_or_resolve,
@@ -87,7 +88,13 @@ def _tojson(value) -> Markup:
 
 
 # Load HTML templates from the templates directory so each route can render pages.
-env = Environment(loader=FileSystemLoader("app/templates"))
+# autoescape is REQUIRED here -- a plain jinja2.Environment defaults to
+# autoescape=False (unlike FastAPI's Jinja2Templates, which enables it), and
+# result.html interpolates object.query_text (raw, user-typed search input)
+# into rendered HTML. Without this, that's a reflected XSS: see EVALUATION.md
+# 1.1, which reproduced it with a GET /search?q=<img src=x onerror=alert(1)>
+# payload rendered unescaped straight into the page <title>.
+env = Environment(loader=FileSystemLoader("app/templates"), autoescape=select_autoescape(["html"]))
 env.filters["render_summary_markdown"] = render_summary_markdown
 env.filters["tojson"] = _tojson
 
@@ -168,6 +175,23 @@ async def object_summary(
     request: Request, simbad_main_id: str, current_user: User | None = Depends(get_current_user)
 ) -> JSONResponse:
     """Return the AI narrative for an object, generating it on demand."""
+    # A cache hit costs no Gemini quota, so it must not be charged against the
+    # per-client rate limit below -- see EVALUATION.md 1.2. Checked before
+    # check_limit() runs at all, not just before record_usage(), since
+    # check_limit() alone doesn't write anything but still incorrectly gated a
+    # free cache read behind the same budget as an actual generation.
+    cached_summary = await get_cached_ai_summary(simbad_main_id)
+    if cached_summary is not None:
+        # A logged-in user still gets their own personal snapshot of the shared
+        # summary on a cache hit, same as on a fresh generation -- this mirrors
+        # the un-shortcut path below and is covered by
+        # test_ai_summary_remains_single_global_value_regardless_of_snapshot_count.
+        if current_user is not None:
+            object_id = await get_object_id_by_simbad_id(simbad_main_id)
+            if object_id is not None:
+                await save_user_summary_snapshot(current_user.id, object_id, cached_summary)
+        return JSONResponse({"summary": cached_summary, "summary_html": render_summary_markdown(cached_summary)})
+
     subject_type = "user" if current_user is not None else "session"
     subject_id = str(current_user.id) if current_user is not None else get_session_id(request)
     try:

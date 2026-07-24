@@ -85,7 +85,7 @@ def _mock_betelgeuse(monkeypatch):
             }
         ),
     )
-    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None)))
+    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None, False)))
 
 
 def test_anonymous_client_is_rate_limited_across_different_objects(monkeypatch):

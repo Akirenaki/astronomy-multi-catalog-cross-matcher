@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, List
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -20,12 +20,19 @@ class ObjectRecord(Base):
     # Core identity and metadata for the queried astronomical object.
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     simbad_main_id: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
-    query_text: Mapped[str] = mapped_column(String, nullable=False)
+    query_text: Mapped[str] = mapped_column(String, nullable=False, index=True)
     ra_deg: Mapped[float | None] = mapped_column(nullable=True)
     dec_deg: Mapped[float | None] = mapped_column(nullable=True)
     otype: Mapped[str | None] = mapped_column(String, nullable=True)
     spectral_type: Mapped[str | None] = mapped_column(String, nullable=True)
     resolution_state: Mapped[str] = mapped_column(String, nullable=False)
+    # True when this record's PARTIAL state reflects a failed Exoplanet Archive
+    # lookup rather than a confirmed "no known planets" -- always False for
+    # RESOLVED/AMBIGUOUS/UNRESOLVED/LOOKUP_FAILED. Drives both the shorter TTL in
+    # store_result() and the caveat shown in result.html's PARTIAL banner. See
+    # EVALUATION.md 1.3: without this, an Exoplanet Archive outage got cached as a
+    # confident negative for the full 14-day TTL.
+    planets_lookup_failed: Mapped[bool] = mapped_column(default=False, nullable=False)
     ai_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Set whenever an AI summary is actually generated (initial generation or a
     # regeneration) -- kept separate from resolved_at since regeneration can happen
@@ -82,6 +89,7 @@ class ObjectRecord(Base):
             "otype": self.otype,
             "spectral_type": self.spectral_type,
             "resolution_state": self.resolution_state,
+            "planets_lookup_failed": self.planets_lookup_failed,
             "ai_summary": self.ai_summary,
             "ai_summary_generated_at": (
                 self.ai_summary_generated_at.isoformat() if self.ai_summary_generated_at else None
@@ -195,6 +203,27 @@ class UserSummarySnapshot(Base):
     __table_args__ = (UniqueConstraint("user_id", "object_id", name="uq_user_summary_snapshot"),)
 
 
+class QueryAlias(Base):
+    """Maps a normalized query string to the ObjectRecord it last resolved to.
+
+    ObjectRecord.query_text only ever holds the *one* query string a row was most
+    recently (re-)resolved from, so "51 Peg", "51 Pegasi", and "HD 217014" -- three
+    different strings that all resolve to the same star -- previously missed the
+    cache and triggered a fresh SIMBAD + Exoplanet Archive round trip every time a
+    new alias was searched, even though the object itself was already cached under
+    a different query_text. This table is a lightweight secondary index so
+    get_cached() can also check "has *any* query string ever resolved to an object
+    that's still fresh" before falling through to a live re-resolution. See
+    EVALUATION.md 1.4.
+    """
+    __tablename__ = "query_aliases"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    query_text: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    object_id: Mapped[int] = mapped_column(ForeignKey("objects.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 class RateLimitEvent(Base):
     """One logged request used for per-user or per-session rate limiting."""
     __tablename__ = "rate_limit_events"
@@ -206,4 +235,8 @@ class RateLimitEvent(Base):
 
     __table_args__ = (
         CheckConstraint("subject_type IN ('user','session')", name="ck_rate_limit_subject_type"),
+        # check_limit() filters by exactly (subject_type, subject_id, created_at) on
+        # every AI-summary request -- see EVALUATION.md suggestion #5. Without this,
+        # that query does a full table scan as rate_limit_events grows.
+        Index("ix_rate_limit_events_subject_created", "subject_type", "subject_id", "created_at"),
     )
