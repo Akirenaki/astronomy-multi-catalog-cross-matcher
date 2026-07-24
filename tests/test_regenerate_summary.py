@@ -23,6 +23,8 @@ from app.database import engine, init_db
 from app.main import app
 from app.models import Base, ObjectRecord
 
+from conftest import get_csrf_token
+
 
 @pytest_asyncio.fixture(autouse=True)
 async def _init_db():
@@ -51,7 +53,7 @@ async def _resolve_fixture_star(monkeypatch, main_id="* alf Ori", query="Betelge
             }
         ),
     )
-    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None)))
+    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None, False)))
     return await cache_mod.get_or_resolve(query, generate_ai_summary=False)
 
 
@@ -148,17 +150,18 @@ def test_regenerate_route_returns_429_with_retry_after(monkeypatch):
             }
         ),
     )
-    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None)))
+    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None, False)))
     monkeypatch.setattr("app.cache.generate_summary", AsyncMock(return_value="a summary"))
 
     encoded_id = quote("* alf Ori", safe="")
     with TestClient(app) as client:
+        csrf_token = get_csrf_token(client)
         client.get("/search?q=Betelgeuse")
 
-        first = client.post(f"/object/{encoded_id}/summary/regenerate")
+        first = client.post(f"/object/{encoded_id}/summary/regenerate", headers={"X-CSRF-Token": csrf_token})
         assert first.status_code == 200
 
-        second = client.post(f"/object/{encoded_id}/summary/regenerate")
+        second = client.post(f"/object/{encoded_id}/summary/regenerate", headers={"X-CSRF-Token": csrf_token})
 
     assert second.status_code == 429
     assert "Retry-After" in second.headers

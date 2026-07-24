@@ -4,8 +4,13 @@
 {% block content %}
   {% if object %}
     {% if object.resolution_state == 'AMBIGUOUS' %}
-      {{ state_banner('AMBIGUOUS', 'Multiple possible matches',
-        '<p>&#8220;' ~ object.query_text ~ '&#8221; matched more than one object in SIMBAD. Pick the one you meant.</p>') }}
+      {% call state_banner('AMBIGUOUS', 'Multiple possible matches') %}
+        <p>&#8220;{{ object.query_text }}&#8221; matched more than one object in SIMBAD. Pick the one you meant.</p>
+        {% if object.candidates and object.candidates[0].candidates_truncated %}
+          <p>Showing the first {{ object.candidates | length }} matches &mdash; SIMBAD found more than that for
+          this identifier. Try a more specific catalog identifier (e.g. HD, HIP, GJ, TYC) to narrow it down.</p>
+        {% endif %}
+      {% endcall %}
       <div class="card">
         {% if object.candidates %}
           <div class="candidate-list">
@@ -30,28 +35,39 @@
       </div>
 
     {% elif object.resolution_state == 'LOOKUP_FAILED' %}
-      {{ state_banner('LOOKUP_FAILED', "Couldn't reach SIMBAD",
-        '<p>This query couldn&rsquo;t be resolved because the SIMBAD lookup itself failed &mdash; a
-        timeout, connection problem, or an unreadable response &mdash; not because &#8220;' ~ object.query_text ~
-        '&#8221; is a known non-match. This differs from UNRESOLVED, which means SIMBAD was
+      {% call state_banner('LOOKUP_FAILED', "Couldn't reach SIMBAD") %}
+        <p>This query couldn&rsquo;t be resolved because the SIMBAD lookup itself failed &mdash; a
+        timeout, connection problem, or an unreadable response &mdash; not because &#8220;{{ object.query_text }}&#8221;
+        is a known non-match. This differs from UNRESOLVED, which means SIMBAD was
         reached and genuinely has no record for the query.</p>
         <p>This is often caused by a network that blocks or can&rsquo;t route to
         <code>simbad.cds.unistra.fr</code> (school/work networks and some containerized
-        dev environments commonly do this).</p>') }}
+        dev environments commonly do this).</p>
+      {% endcall %}
       <div class="card">
         <a class="btn btn--primary" href="/search?q={{ object.query_text | urlencode }}">Retry this search</a>
       </div>
 
     {% else %}
       {% if object.resolution_state == 'RESOLVED' %}
-        {{ state_banner('RESOLVED', 'Clean match',
-          '<p>A single, unambiguous SIMBAD record was found, with planetary data available from the NASA Exoplanet Archive where applicable.</p>') }}
+        {% call state_banner('RESOLVED', 'Clean match') %}
+          <p>A single, unambiguous SIMBAD record was found, with planetary data available from the NASA Exoplanet Archive where applicable.</p>
+        {% endcall %}
       {% elif object.resolution_state == 'PARTIAL' %}
-        {{ state_banner('PARTIAL', 'Matched, with gaps',
-          '<p>SIMBAD resolved this object, but no matching entry was found in the NASA Exoplanet Archive &mdash; either it has no known planets, or the archive doesn&rsquo;t cross-reference this identifier.</p>') }}
+        {% call state_banner('PARTIAL', 'Matched, with gaps') %}
+          {% if object.planets_lookup_failed %}
+            <p>SIMBAD resolved this object, but the NASA Exoplanet Archive lookup itself failed &mdash;
+            a timeout, connection problem, or an unreadable response. This is <em>not</em> a confirmed
+            absence of planets, unlike the usual PARTIAL case below; it will be retried automatically
+            within the hour rather than cached for two weeks.</p>
+          {% else %}
+            <p>SIMBAD resolved this object, but no matching entry was found in the NASA Exoplanet Archive &mdash; either it has no known planets, or the archive doesn&rsquo;t cross-reference this identifier.</p>
+          {% endif %}
+        {% endcall %}
       {% elif object.resolution_state == 'UNRESOLVED' %}
-        {{ state_banner('UNRESOLVED', 'No match found',
-          '<p>SIMBAD was reached successfully but has no record for &#8220;' ~ object.query_text ~ '&#8221;. Check the spelling or try a catalog identifier (e.g. HD, HIP, GJ, TYC) instead of an informal name.</p>') }}
+        {% call state_banner('UNRESOLVED', 'No match found') %}
+          <p>SIMBAD was reached successfully but has no record for &#8220;{{ object.query_text }}&#8221;. Check the spelling or try a catalog identifier (e.g. HD, HIP, GJ, TYC) instead of an informal name.</p>
+        {% endcall %}
       {% endif %}
 
       <div class="card">
@@ -75,10 +91,12 @@
           {% if current_user %}
             {% if favorited %}
               <form action="/object/{{ object.simbad_main_id | urlencode }}/unfavorite" method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
                 <button type="submit" class="favorite-btn favorite-btn--active">★ Saved &mdash; remove</button>
               </form>
             {% else %}
               <form action="/object/{{ object.simbad_main_id | urlencode }}/favorite" method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
                 <button type="submit" class="favorite-btn">☆ Save this object</button>
               </form>
             {% endif %}
@@ -284,7 +302,10 @@
             statusElement.classList.remove('ai-summary-status--error');
             statusElement.textContent = 'Regenerating…';
           }
-          fetch('/object/' + encodeURIComponent(simbadId) + '/summary/regenerate', { method: 'POST' })
+          fetch('/object/' + encodeURIComponent(simbadId) + '/summary/regenerate', {
+            method: 'POST',
+            headers: { 'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]').content }
+          })
             .then(function (response) {
               if (response.status === 429) {
                 // Our own throttling: either the per-object 5-minute cooldown or

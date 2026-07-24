@@ -8,26 +8,29 @@ from contextlib import asynccontextmanager
 from markupsafe import Markup
 from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, Form, Request
+from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from jinja2 import Environment, FileSystemLoader
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.auth import (
     DuplicateEmailError,
     authenticate,
     create_user,
+    get_csrf_token,
     get_current_user,
     get_session_id,
     log_in_session,
     log_out_session,
+    verify_csrf_token,
 )
 from app.cache import (
     AI_SUMMARY_COOLDOWN,
     CooldownActiveError,
     add_favorite,
     ensure_ai_summary,
+    get_cached_ai_summary,
     get_object_by_simbad_id,
     get_object_id_by_simbad_id,
     get_or_resolve,
@@ -87,9 +90,33 @@ def _tojson(value) -> Markup:
 
 
 # Load HTML templates from the templates directory so each route can render pages.
-env = Environment(loader=FileSystemLoader("app/templates"))
+# autoescape is REQUIRED here -- a plain jinja2.Environment defaults to
+# autoescape=False (unlike FastAPI's Jinja2Templates, which enables it), and
+# result.html interpolates object.query_text (raw, user-typed search input)
+# into rendered HTML. Without this, that's a reflected XSS: see EVALUATION.md
+# 1.1, which reproduced it with a GET /search?q=<img src=x onerror=alert(1)>
+# payload rendered unescaped straight into the page <title>.
+env = Environment(loader=FileSystemLoader("app/templates"), autoescape=select_autoescape(["html"]))
 env.filters["render_summary_markdown"] = render_summary_markdown
 env.filters["tojson"] = _tojson
+env.globals["csrf_token"] = get_csrf_token
+
+
+async def require_csrf_form(request: Request, csrf_token: str = Form(...)) -> None:
+    """FastAPI dependency for form-encoded POST routes: reject the request before
+    it does anything if the submitted csrf_token doesn't match this session's.
+    See EVALUATION.md suggestion #6."""
+    if not verify_csrf_token(request, csrf_token):
+        raise HTTPException(status_code=403, detail="Invalid or missing CSRF token. Please reload the page and try again.")
+
+
+async def require_csrf_header(request: Request) -> None:
+    """FastAPI dependency for JSON/fetch-based POST routes (no form body to carry a
+    csrf_token field): reads the token from the X-CSRF-Token header instead, which
+    result.html's JS sets from the <meta name="csrf-token"> tag in base.html. See
+    EVALUATION.md suggestion #6."""
+    if not verify_csrf_token(request, request.headers.get("x-csrf-token")):
+        raise HTTPException(status_code=403, detail="Invalid or missing CSRF token. Please reload the page and try again.")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -168,6 +195,23 @@ async def object_summary(
     request: Request, simbad_main_id: str, current_user: User | None = Depends(get_current_user)
 ) -> JSONResponse:
     """Return the AI narrative for an object, generating it on demand."""
+    # A cache hit costs no Gemini quota, so it must not be charged against the
+    # per-client rate limit below -- see EVALUATION.md 1.2. Checked before
+    # check_limit() runs at all, not just before record_usage(), since
+    # check_limit() alone doesn't write anything but still incorrectly gated a
+    # free cache read behind the same budget as an actual generation.
+    cached_summary = await get_cached_ai_summary(simbad_main_id)
+    if cached_summary is not None:
+        # A logged-in user still gets their own personal snapshot of the shared
+        # summary on a cache hit, same as on a fresh generation -- this mirrors
+        # the un-shortcut path below and is covered by
+        # test_ai_summary_remains_single_global_value_regardless_of_snapshot_count.
+        if current_user is not None:
+            object_id = await get_object_id_by_simbad_id(simbad_main_id)
+            if object_id is not None:
+                await save_user_summary_snapshot(current_user.id, object_id, cached_summary)
+        return JSONResponse({"summary": cached_summary, "summary_html": render_summary_markdown(cached_summary)})
+
     subject_type = "user" if current_user is not None else "session"
     subject_id = str(current_user.id) if current_user is not None else get_session_id(request)
     try:
@@ -203,7 +247,7 @@ async def object_summary(
     return JSONResponse({"summary": summary, "summary_html": render_summary_markdown(summary)})
 
 
-@app.post("/object/{simbad_main_id}/summary/regenerate")
+@app.post("/object/{simbad_main_id}/summary/regenerate", dependencies=[Depends(require_csrf_header)])
 async def object_summary_regenerate(
     request: Request, simbad_main_id: str, current_user: User | None = Depends(get_current_user)
 ) -> JSONResponse:
@@ -298,7 +342,7 @@ async def register_form(request: Request, next: str | None = None) -> HTMLRespon
     return HTMLResponse(content=html)
 
 
-@app.post("/register", response_class=HTMLResponse, response_model=None)
+@app.post("/register", response_class=HTMLResponse, response_model=None, dependencies=[Depends(require_csrf_form)])
 async def register_submit(
     request: Request, email: str = Form(...), password: str = Form(...), next: str | None = Form(None)
 ) -> HTMLResponse | RedirectResponse:
@@ -333,7 +377,7 @@ async def login_form(request: Request, next: str | None = None) -> HTMLResponse:
     return HTMLResponse(content=html)
 
 
-@app.post("/login", response_class=HTMLResponse, response_model=None)
+@app.post("/login", response_class=HTMLResponse, response_model=None, dependencies=[Depends(require_csrf_form)])
 async def login_submit(
     request: Request, email: str = Form(...), password: str = Form(...), next: str | None = Form(None)
 ) -> HTMLResponse | RedirectResponse:
@@ -348,14 +392,14 @@ async def login_submit(
     return RedirectResponse(url=_safe_next_path(next), status_code=303)
 
 
-@app.post("/logout")
+@app.post("/logout", dependencies=[Depends(require_csrf_form)])
 async def logout(request: Request) -> RedirectResponse:
     """Clear the current session's logged-in state."""
     log_out_session(request)
     return RedirectResponse(url="/", status_code=303)
 
 
-@app.post("/object/{simbad_main_id}/favorite", response_model=None)
+@app.post("/object/{simbad_main_id}/favorite", response_model=None, dependencies=[Depends(require_csrf_form)])
 async def favorite_object(
     request: Request, simbad_main_id: str, current_user: User | None = Depends(get_current_user)
 ) -> RedirectResponse | JSONResponse:
@@ -372,7 +416,7 @@ async def favorite_object(
     return RedirectResponse(url=f"/object/{quote(simbad_main_id, safe='')}", status_code=303)
 
 
-@app.post("/object/{simbad_main_id}/unfavorite", response_model=None)
+@app.post("/object/{simbad_main_id}/unfavorite", response_model=None, dependencies=[Depends(require_csrf_form)])
 async def unfavorite_object(
     request: Request, simbad_main_id: str, current_user: User | None = Depends(get_current_user)
 ) -> RedirectResponse | JSONResponse:

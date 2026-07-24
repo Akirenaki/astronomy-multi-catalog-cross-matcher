@@ -33,10 +33,10 @@ The resolver, cross-matcher, and AI narrative are fully usable anonymously. An o
 | **ORM / DB toolkit** | [SQLAlchemy](https://www.sqlalchemy.org/) (async) | Defines the schema (`objects`, `identifiers`, `planets`, `users`, `saved_searches`, `user_summary_snapshots`, `rate_limit_events` — see [Section VI](#vi-database-schema)) and handles querying/caching logic without hand-written SQL for most operations. |
 | **Database driver** | `aiosqlite` (local dev) / `asyncpg` (production) | SQLAlchemy's async engine needs an async-capable driver. SQLite (`aiosqlite`) is used for local development because it needs zero setup; `asyncpg` talks to the production Postgres database. |
 | **Database (production)** | [Neon](https://neon.tech/) (serverless Postgres) | Free-tier, always-on-URL Postgres — no local Postgres install required, and it's what the app's `DATABASE_URL` points at once deployed. Chosen over SQLite-in-production because SQLite's on-disk file cannot safely be relied on in a hosting environment with an ephemeral filesystem (see [hosting note](#hosting-render) below). |
-| **Templating** | [Jinja2](https://jinja.palletsprojects.com/) | Server-side HTML rendering for all pages (`result.html`, `history.html`, account pages, etc.), kept deliberately simple/server-rendered rather than adding a separate frontend framework. |
+| **Templating** | [Jinja2](https://jinja.palletsprojects.com/) | Server-side HTML rendering for all pages (`result.html`, `history.html`, account pages, etc.), kept deliberately simple/server-rendered rather than adding a separate frontend framework. Autoescaping is explicitly enabled (`select_autoescape(["html"])`) — a plain `jinja2.Environment` defaults to autoescape *off*, unlike FastAPI's `Jinja2Templates`, so this has to be set explicitly rather than assumed. |
 | **Data validation** | [Pydantic](https://docs.pydantic.dev/) | Comes bundled with FastAPI; validates request/response shapes and config/environment variables. |
 | **AI narrative generation** | [Google Gemini API](https://ai.google.dev/) (`google-genai`, free tier) | Generates the plain-English summary layer described in [Section III](#iii-app--user-workflow), kept strictly separate from the deterministic SQL/ADQL resolution layer so it can never introduce a factual error the catalog data didn't already contain. |
-| **Auth** | Starlette `SessionMiddleware` + `bcrypt` | Session-cookie based login (no separate session-token table — see the `users` table in [Section VI](#vi-database-schema)). Passwords are hashed with bcrypt; plaintext is never stored or logged. |
+| **Auth** | Starlette `SessionMiddleware` + `bcrypt` | Session-cookie based login (no separate session-token table — see the `users` table in [Section VI](#vi-database-schema)). Passwords are hashed with bcrypt, must be at least 8 characters, and are never stored or logged in plaintext. All mutating POST routes (register/login/logout/favorite/unfavorite/regenerate) are protected by a session-bound CSRF token — see FAQ [G](#g-how-is-csrf-protection-implemented). |
 | **Markdown rendering** | `markdown-it-py` | Renders the Gemini-generated summary text (plain Markdown, no HTML) safely into HTML for display. |
 | **Testing** | `pytest` / `pytest-asyncio` | Unit and route-level tests across the resolver, cache, rate-limiting, and summary-generation logic. |
 
@@ -71,7 +71,7 @@ Accounts are entirely optional; every step above works the same for an anonymous
   1. **Per-object cooldown (5 minutes).** Stops rapid double-clicking Regenerate on the *same* object. Applies regardless of login state.
   2. **Per-client rate limit (20 requests/hour).** Stops one client — a logged-in user, or an anonymous browser identified by its session cookie — from spending Gemini quota by clicking Generate across *many different* objects in a short window, which the per-object cooldown alone doesn't prevent.
 
-See the FAQ for why `/history` stays global, why anonymous save actions redirect to login, and why CSRF protection is still a known limitation.
+See the FAQ for why `/history` stays global, why anonymous save actions redirect to login, and how CSRF protection works.
 
 ---
 
@@ -112,6 +112,7 @@ This is the core table of the application. It caches the primary astronomical da
 | **otype** | VARCHAR | Yes | Object Type |
 | **spectral_type** | VARCHAR | Yes | |
 | **resolution_state** | VARCHAR | No | CHECK (`RESOLVED`, `AMBIGUOUS`, `PARTIAL`, `UNRESOLVED`, `LOOKUP_FAILED`) |
+| **planets_lookup_failed** | BOOLEAN | No | Default `False` |
 | **ai_summary** | TEXT | Yes | |
 | **ai_summary_generated_at** | DATETIME | Yes | Set on real (re)generation only, never on a cache hit |
 | **candidates_json** | TEXT | Yes | |
@@ -123,18 +124,19 @@ This is the core table of the application. It caches the primary astronomical da
 
 - **`id`**: Unique internal auto-incrementing identifier for each master object record.
 - **`simbad_main_id`**: The canonical, standard primary identifier returned by the SIMBAD database. Enforces a `UNIQUE` constraint so we never duplicate the same real-world celestial object in our cache.
-- **`query_text`**: The exact, raw string typed by the user (e.g., `"51 peg"`). Crucial for checking if a casual user search hits an already cached query.
+- **`query_text`**: The exact, raw (normalized) string this row was most recently resolved from. Repeat searches of the *same* string hit this column directly; a *different* alias for an already-cached object (e.g. searching "51 Pegasi" after "51 Peg") is instead served via the `query_aliases` table (see below) rather than triggering its own live SIMBAD round trip.
 - **`ra_deg`**: Right Ascension converted to decimal degrees. Represents the celestial equivalent of longitude. Nullable if the object cannot be resolved or lacks spatial coordinates.
 - **`dec_deg`**: Declination converted to decimal degrees. Represents the celestial equivalent of latitude.
 - **`otype`**: The astronomical object classification returned by SIMBAD (e.g., Star, High proper-motion Star, White Dwarf).
 - **`spectral_type`**: The spectral classification of the star (e.g., `G5V`), indicating its temperature, luminosity, and evolutionary stage.
 - **`resolution_state`**: The core state engine value of the application. Restricted by a `CHECK` constraint to exactly five mutually exclusive states: `RESOLVED`, `AMBIGUOUS`, `PARTIAL`, `UNRESOLVED`, or `LOOKUP_FAILED`.
+- **`planets_lookup_failed`**: `True` only for a `PARTIAL` row where "no planets" is unconfirmed because the NASA Exoplanet Archive lookup itself failed (timeout/transport error), rather than a genuine, confirmed zero-match. Drives both the shorter 1-hour cache TTL for that case (see `expires_at` below) and an extra caveat shown in the PARTIAL result banner. Always `False` for every other resolution state.
 - **`ai_summary`**: The plain-language narrative generated by the Gemini API. Stored here safely as a string text layer so it cannot touch or corrupt the scientific coordinate float data.
 - **`ai_summary_generated_at`**: Timestamp of the last real generation (initial Generate or a Regenerate) — never updated on a cache hit. Drives the 5-minute per-object cooldown on regeneration; null until a summary has been generated at least once.
-- **`candidates_json`**: A stringified JSON array utilized when a state is `AMBIGUOUS`. It stores the basic data of multiple potential stellar matches so the UI can render a disambiguation selection list.
+- **`candidates_json`**: A stringified JSON array utilized when a state is `AMBIGUOUS`. It stores the basic data of multiple potential stellar matches so the UI can render a disambiguation selection list. If SIMBAD matched more than 10 objects, only the first 10 are stored and each carries a `candidates_truncated: true` marker so the UI can say so rather than presenting a silently incomplete list.
 - **`resolved_via_json`**: A stringified JSON audit trail recording exactly how the app navigated from the raw query to the final match (e.g., `User Input -> SIMBAD Alias -> NASA Exoplanet ID`).
 - **`resolved_at`**: The precise timestamp of when the external API lookup was performed and recorded.
-- **`expires_at`**: The calculated cache expiration timestamp. Used by the background logic to enforce the 14-day TTL for successful resolutions and the 1-hour TTL for failed/ambiguous lookups.
+- **`expires_at`**: The calculated cache expiration timestamp. Used by the background logic to enforce the 14-day TTL for successful resolutions, and a shorter 1-hour TTL for `UNRESOLVED`/`AMBIGUOUS`/`LOOKUP_FAILED` rows *and* for a `PARTIAL` row with `planets_lookup_failed=True` — none of those are confident enough conclusions to sit uncorrected for two weeks.
 
 ---
 
@@ -273,6 +275,24 @@ An event log of Gemini-quota-spending actions (Generate/Regenerate clicks), used
 - **`subject_id`**: The `users.id` or session id this event counts against, as a string — not a foreign key to `users.id`, since one column needs to hold both kinds of identifier uniformly, and log rows should survive a user account being deleted rather than needing `ON DELETE` handling on what's really just an audit trail.
 - **`created_at`**: When the request was made — the sliding window (20 requests/hour) is computed by counting rows newer than `now - 1 hour` for the same `(subject_type, subject_id)` pair.
 
+### 8. The `query_aliases` Table
+
+A lightweight secondary index mapping every (normalized) query string that has ever resolved to a given object -- including its own canonical `simbad_main_id` -- onto that object's `objects.id`. `objects.query_text` only ever holds the *one* string the row was most recently resolved from, so without this table, a different alias for an already-cached object (e.g. "51 Peg" vs. "51 Pegasi" vs. "HD 217014", or looking an object up by its own SIMBAD ID rather than the string originally searched) would miss the cache and trigger its own redundant SIMBAD + Exoplanet Archive round trip.
+
+| Column Name | Data Type | Nullable? | Constraints / Notes |
+| :--- | :--- | :--- | :--- |
+| **id** | INTEGER | No | PRIMARY KEY |
+| **query_text** | VARCHAR | No | UNIQUE |
+| **object_id** | INTEGER | No | FOREIGN KEY → `objects.id`, `ON DELETE CASCADE`, indexed |
+| **created_at** | DATETIME | No | |
+
+#### Detailed Column Explanations for `query_aliases`
+
+- **`id`**: Internal unique identifier for the alias row.
+- **`query_text`**: A normalized query string that has, at some point, resolved to `object_id`. `UNIQUE` so each string points at exactly one (the most recent) object.
+- **`object_id`**: The object this string currently resolves to. Repointed in place (not duplicated) if the same string is later resolved and maps to a different object.
+- **`created_at`**: When this alias mapping was created or last repointed.
+
 </details>
 
 ---
@@ -380,13 +400,19 @@ Was SIMBAD actually reachable, and did it return a usable response?
       └─ YES, but is it ambiguous?
          ├─ YES (multiple candidates) → AMBIGUOUS (show list, end)
          └─ NO (one object)
-            └─ Does Exoplanet Archive have planets for this object?
-               ├─ YES → RESOLVED (show full profile)
-               └─ NO  → PARTIAL (show star data, note no planets)
+            └─ Was the Exoplanet Archive itself reachable?
+               ├─ NO (timeout / transport error / unparseable response)
+               │     → PARTIAL, planets_lookup_failed=True (short 1-hour TTL, retried
+               │       automatically -- this is an unconfirmed "no planets", not a
+               │       confirmed one; see objects.planets_lookup_failed in §VI.1)
+               └─ YES
+                  └─ Does it have planets for this object?
+                     ├─ YES → RESOLVED (show full profile)
+                     └─ NO  → PARTIAL, planets_lookup_failed=False (confirmed no planets)
 
 ```
 
-**Each state is mutually exclusive and exhaustive** — every possible search outcome falls into exactly one bucket.
+**Each state is mutually exclusive and exhaustive** — every possible search outcome falls into exactly one bucket. `planets_lookup_failed` is an additional flag layered on top of PARTIAL, not a sixth state, since both cases render the same "matched, but no planets" page shape and only differ in how confident that "no planets" claim is and how long it's cached for.
 
 </details>
 
@@ -415,9 +441,11 @@ Both checks run on every Generate/Regenerate request; either can reject it indep
 
 Favorites are tied to a user account. If you are not logged in, the app redirects you to `/login` and then brings you back to the object page after authentication so the action can be completed on the right account.
 
-### **G. "Why isn't CSRF protection implemented yet?"**
+### **G. "How is CSRF protection implemented?"**
 
-This app currently uses session-cookie auth with form POSTs, but it does not yet include CSRF tokens. That is acceptable for local or portfolio use, but it should be added before any public deployment.
+Every mutating route (`/register`, `/login`, `/logout`, favorite/unfavorite, and AI-summary regeneration) requires a CSRF token that must match the one minted for the visitor's own session. Form-based routes carry it as a hidden `csrf_token` field; the one JS-driven route (regenerate-summary, a `fetch()` POST with no form body) sends it as an `X-CSRF-Token` header instead, read from a `<meta name="csrf-token">` tag rendered into every page. The token itself lives in the same signed, `itsdangerous`-backed session cookie the app already uses for login state, so it can't be forged or read cross-origin -- see `app.auth.get_csrf_token`/`verify_csrf_token`.
+
+There is no minimum password complexity requirement beyond an 8-character floor (`app.auth._MIN_PASSWORD_LENGTH`) -- reasonable for a portfolio project, but worth knowing if you're reusing this auth code elsewhere.
 
 ### **H. "How do I query the resolver programmatically?"**
 

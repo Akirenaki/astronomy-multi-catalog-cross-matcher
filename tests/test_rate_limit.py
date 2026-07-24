@@ -19,6 +19,8 @@ from app.database import engine, init_db
 from app.main import app
 from app.models import Base
 
+from conftest import get_csrf_token
+
 
 @pytest_asyncio.fixture(autouse=True)
 async def _init_db():
@@ -85,7 +87,7 @@ def _mock_betelgeuse(monkeypatch):
             }
         ),
     )
-    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None)))
+    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None, False)))
 
 
 def test_anonymous_client_is_rate_limited_across_different_objects(monkeypatch):
@@ -154,10 +156,14 @@ def test_rate_limit_response_shape_matches_cooldown_response_shape(monkeypatch):
     monkeypatch.setattr("app.cache.generate_summary", AsyncMock(return_value="a summary"))
 
     with TestClient(app) as client:
+        csrf_token = get_csrf_token(client)
         client.get("/search?q=Betelgeuse")
         client.get(f"/object/{quote('* alf Ori', safe='')}/summary")  # consumes the only slot
 
-        blocked = client.post(f"/object/{quote('* alf Ori', safe='')}/summary/regenerate")
+        blocked = client.post(
+            f"/object/{quote('* alf Ori', safe='')}/summary/regenerate",
+            headers={"X-CSRF-Token": csrf_token},
+        )
 
     assert blocked.status_code == 429
     body = blocked.json()

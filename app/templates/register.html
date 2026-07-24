@@ -6,6 +6,7 @@
     <h1>Register</h1>
     {% if error %}<p class="error-text">{{ error }}</p>{% endif %}
     <form action="/register" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
       {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
       <div class="field">
         <label for="email">Email</label>
@@ -13,7 +14,8 @@
       </div>
       <div class="field">
         <label for="password">Password</label>
-        <input type="password" id="password" name="password" required maxlength="72">
+        <input type="password" id="password" name="password" required minlength="8" maxlength="72">
+        <p class="field__hint">At least 8 characters.</p>
       </div>
       <button type="submit" class="btn btn--primary">Create account</button>
     </form>

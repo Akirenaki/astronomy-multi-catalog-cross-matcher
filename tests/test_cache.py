@@ -54,7 +54,7 @@ async def test_ambiguous_result_persists_candidates(monkeypatch):
         "app.resolver.resolve_identity", AsyncMock(return_value=fake_candidates)
     )
     monkeypatch.setattr(
-        "app.resolver.find_planets", AsyncMock(return_value=([], None))
+        "app.resolver.find_planets", AsyncMock(return_value=([], None, False))
     )
 
     record = await cache_mod.get_or_resolve("51 Peg Ambiguous Test")
@@ -83,7 +83,7 @@ async def test_lookup_failed_gets_short_ttl_and_no_summary(monkeypatch):
         raise SimbadLookupError("simulated network failure")
 
     monkeypatch.setattr("app.resolver.resolve_identity", failing_simbad)
-    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None)))
+    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None, False)))
 
     record = await cache_mod.get_or_resolve("HD 217014 Lookup Failed Test")
 
@@ -105,7 +105,7 @@ async def test_ambiguous_candidates_survive_a_cache_hit(monkeypatch):
     ]
     resolve_mock = AsyncMock(return_value=fake_candidates)
     monkeypatch.setattr("app.resolver.resolve_identity", resolve_mock)
-    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None)))
+    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None, False)))
 
     first = await cache_mod.get_or_resolve("Alpha Cache Test")
     second = await cache_mod.get_or_resolve("Alpha Cache Test")
@@ -140,7 +140,7 @@ async def test_resolved_record_relationships_readable_after_session_closes(monke
     )
     monkeypatch.setattr(
         "app.resolver.find_planets",
-        AsyncMock(return_value=([{"pl_name": "51 Peg b", "pl_letter": "b"}], "HD 217014")),
+        AsyncMock(return_value=([{"pl_name": "51 Peg b", "pl_letter": "b"}], "HD 217014", False)),
     )
 
     record = await cache_mod.get_or_resolve("51 Peg Relationship Test")
@@ -177,7 +177,7 @@ async def test_get_or_resolve_generate_ai_summary_false_skips_gemini(monkeypatch
             }
         ),
     )
-    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None)))
+    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None, False)))
     summary_mock = AsyncMock(return_value="should not be called")
     monkeypatch.setattr("app.cache.generate_summary", summary_mock)
 
@@ -207,7 +207,7 @@ async def test_ensure_ai_summary_generates_and_persists_once(monkeypatch):
             }
         ),
     )
-    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None)))
+    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None, False)))
     summary_mock = AsyncMock(return_value="Betelgeuse is a huge red star with no known planets.")
     monkeypatch.setattr("app.cache.generate_summary", summary_mock)
 
@@ -264,3 +264,85 @@ async def test_ensure_ai_summary_raises_lookup_error_for_unknown_id():
     link, etc.) must raise, not silently fabricate a response."""
     with pytest.raises(LookupError):
         await cache_mod.ensure_ai_summary("this-id-does-not-exist")
+
+
+@pytest.mark.asyncio
+async def test_alias_search_reuses_cached_object_and_preserves_ai_summary(monkeypatch):
+    """Regression test for EVALUATION.md 1.4: a different query string for an object
+    that's already cached (e.g. "51 Peg" vs "51 Pegasi", both resolving to the same
+    SIMBAD main_id) must not trigger its own full SIMBAD + Exoplanet Archive round
+    trip once that object has already been seen under any alias, and must never
+    silently discard a previously generated AI summary along the way."""
+    simbad_mock = AsyncMock(
+        return_value={
+            "main_id": "51 Peg",
+            "ra": 344.36,
+            "dec": 20.77,
+            "otype": "Star",
+            "sp_type": "G2V",
+            "aliases": ["HD 217014"],
+        }
+    )
+    monkeypatch.setattr("app.resolver.resolve_identity", simbad_mock)
+    monkeypatch.setattr(
+        "app.resolver.find_planets",
+        AsyncMock(return_value=([{"pl_name": "51 Peg b", "pl_letter": "b"}], "HD 217014", False)),
+    )
+    summary_mock = AsyncMock(return_value="A Sun-like star with one known planet.")
+    monkeypatch.setattr("app.cache.generate_summary", summary_mock)
+
+    # First search: a genuine first-time resolution. Generates the summary.
+    first = await cache_mod.get_or_resolve("51 Peg")
+    assert first.ai_summary == "A Sun-like star with one known planet."
+    assert simbad_mock.await_count == 1
+    summary_mock.assert_awaited_once()
+
+    # Second search, a *different*, never-before-seen alias for the same object:
+    # this is still a genuine cache miss (this exact string has never been
+    # resolved), so it does re-resolve once -- but store_result() must reuse the
+    # existing row (matched via simbad_main_id) rather than deleting and
+    # recreating it, which is what would have discarded the summary before this fix.
+    second = await cache_mod.get_or_resolve("51 Pegasi")
+    assert second.id == first.id
+    assert second.ai_summary == "A Sun-like star with one known planet."
+    assert simbad_mock.await_count == 2
+    summary_mock.assert_awaited_once()  # still only the one generation, ever
+
+    # Third search, back to the *original* query string: by now the row's
+    # query_text has moved on to "51 Pegasi" (the most recently resolved alias),
+    # so a direct ObjectRecord.query_text match would miss -- this must be served
+    # via the QueryAlias fallback instead of resolving a third time.
+    third = await cache_mod.get_or_resolve("51 Peg")
+    assert third.id == first.id
+    assert third.ai_summary == "A Sun-like star with one known planet."
+    assert simbad_mock.await_count == 2  # unchanged: served from the alias index
+
+
+@pytest.mark.asyncio
+async def test_get_or_resolve_by_simbad_main_id_hits_cache(monkeypatch):
+    """Regression test for EVALUATION.md 1.5: main.py's object_profile() falls back
+    to get_or_resolve(simbad_main_id) whenever a direct get_object_by_simbad_id()
+    lookup misses. Once an object has been resolved at all, looking it up again by
+    its own canonical simbad_main_id (not the original search string) must be a
+    cache hit, not a redundant live re-resolution."""
+    simbad_mock = AsyncMock(
+        return_value={
+            "main_id": "* 51 Peg",
+            "ra": 344.36,
+            "dec": 20.77,
+            "otype": "Star",
+            "sp_type": "G2V",
+            "aliases": ["HD 217014"],
+        }
+    )
+    monkeypatch.setattr("app.resolver.resolve_identity", simbad_mock)
+    monkeypatch.setattr("app.resolver.find_planets", AsyncMock(return_value=([], None, False)))
+
+    first = await cache_mod.get_or_resolve("51 Peg")
+    assert simbad_mock.await_count == 1
+
+    # Looking the same object up by its own simbad_main_id (as object_profile()'s
+    # fallback does) must not trigger a second SIMBAD round trip.
+    by_main_id = await cache_mod.get_or_resolve(first.simbad_main_id)
+    assert by_main_id.id == first.id
+    assert simbad_mock.await_count == 1

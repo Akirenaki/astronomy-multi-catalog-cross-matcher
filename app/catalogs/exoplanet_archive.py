@@ -16,7 +16,7 @@ _BATCH_SIZE = 40
 _EXOPLANET_ARCHIVE_URL = "https://exoplanetarchive.ipac.caltech.edu/TAP/sync"
 
 
-async def find_planets(alias_list: list[str]) -> tuple[list[dict], str | None]:
+async def find_planets(alias_list: list[str]) -> tuple[list[dict], str | None, bool]:
     """Search the NASA Exoplanet Archive for planets associated with any alias.
 
     Tries every alias in one batched `hostname IN (...)` query per chunk, rather than
@@ -30,10 +30,20 @@ async def find_planets(alias_list: list[str]) -> tuple[list[dict], str | None]:
     That multiplied into multi-minute searches that timed out the browser/dev-proxy
     even though the app itself was still working underneath. Batching collapses that
     into (usually) exactly one request.
+
+    Returns (planets, matched_alias, lookup_failed). lookup_failed is True only when
+    the function is about to report "no planets" (planets == []) *and* at least one
+    chunk's request failed outright rather than genuinely returning zero rows -- i.e.
+    exactly the case where "no planets found" would otherwise be indistinguishable
+    from "couldn't finish checking". If a match is found, lookup_failed is always
+    False, since a confirmed positive doesn't need this caveat regardless of whether
+    some other chunk also failed. See EVALUATION.md 1.3: callers must not cache a
+    lookup_failed=True result as a confident negative for the normal 14-day TTL.
     """
     if not alias_list:
-        return [], None
+        return [], None, False
 
+    any_chunk_failed = False
     for chunk_start in range(0, len(alias_list), _BATCH_SIZE):
         chunk = alias_list[chunk_start : chunk_start + _BATCH_SIZE]
         rows_by_hostname = await _query_hostnames(chunk)
@@ -41,7 +51,9 @@ async def find_planets(alias_list: list[str]) -> tuple[list[dict], str | None]:
             # This chunk's request failed outright (see _query_hostnames' logging) --
             # move on to the next chunk rather than aborting the whole search, matching
             # the old per-alias loop's fault tolerance (one bad request didn't used to
-            # sink the entire lookup either).
+            # sink the entire lookup either). Remembered so an eventual "no planets"
+            # here can be reported as unconfirmed rather than a clean negative.
+            any_chunk_failed = True
             continue
 
         # Preserve the same priority order the old sequential loop had: the first
@@ -51,9 +63,9 @@ async def find_planets(alias_list: list[str]) -> tuple[list[dict], str | None]:
         for alias in chunk:
             rows = rows_by_hostname.get(alias)
             if rows:
-                return _rows_to_planets(rows), alias
+                return _rows_to_planets(rows), alias, False
 
-    return [], None
+    return [], None, any_chunk_failed
 
 
 async def _query_hostnames(aliases: list[str]) -> dict[str, list[dict]] | None:
